@@ -1,0 +1,135 @@
+%% ============================================================
+%% RAASC revision patch -- copy each block into RAASC_IEEE.tex
+%% (IEEEtran, two columns). No preamble/format change needed;
+%% all tables use only booktabs/array, as in the paper.
+%% ============================================================
+
+%% ---------- [A] ABSTRACT: replace the last two sentences ----------
+% "... a ... The workload is synthetic, and no clinical safety claim is made."
+% with:
+Against a TTL cache that uses RAASC's own reuse limits, the safety difference is not significant, but RAASC gives 4.7 points more hits. The bound on the expected risk is conditional on stated assumptions, and supplementary tests show where it fails to hold (selective calibration labels) and what the degraded mode and the deny-list cost. The workload is synthetic, and no clinical safety claim is made.
+
+%% ---------- [B] INTRODUCTION: replace the paragraph that starts "Section II reviews related work." ----------
+Section~II reviews related work. Section~III formulates the problem and Section~IV presents the RAASC design. Section~V analyses the estimators, the reuse limit and the conditions under which the risk budget bounds the expected risk. Section~VI describes the experimental setup, and Section~VII reports the results, including supplementary tests of the harm metric, the degraded mode, the deny-list and the calibration labels. Section~VIII discusses safety, deployment, limitations and a validation protocol, and Section~IX concludes.
+
+%% ---------- [C] SECTION III: add after Eq. (1) and its sentence "The cost (1) is controlled ..." ----------
+Two severity conventions must be kept apart. Eq.~(1) and Eq.~(3) use the severity $\sigma_c$ of the \emph{served entry's} class, because this is the only class known to the gateway when it decides. The experiments report the realised harm $H_k=\sigma_{c(I_k)}\,U_j$, which uses the severity of the \emph{true} intent $I_k$. The two coincide for stale hits and for wrong-intent hits within one class; they differ only when a wrong-intent hit crosses classes. Proposition~5(c) bounds $H_k$ explicitly.
+
+%% ---------- [D] SECTION IV-C: add at the end of the "Similarity calibrator" paragraph ----------
+The prior is fixed by $p_0(b)=0.6\cdot 0.7^{\,b}$ for bins $b=0,\dots,9$, that is $0.600$, $0.420$, $0.294$, $0.206$, $0.144$, $0.101$, $0.071$, $0.049$, $0.035$ and $0.024$ from the lowest to the highest similarity bin; it is a design choice that was not tuned, and the evaluation of Section~VII-K varies it.
+
+%% ---------- [E] SECTION IV-C ("Labels at no extra cost"): add at the end of the paragraph ----------
+These labels are not a random sample of the traffic: a candidate is labelled at a miss with probability one, but at a served hit only with probability $\epsilon$, and whether it is served depends on the calibrator itself. An estimate that is too optimistic therefore corrects itself only at rate $\epsilon$, whereas a too pessimistic one is corrected at once. Section~VII-K quantifies this effect. Two countermeasures follow. First, the audit rate of a bin is raised to one until the bin holds $n_{\min}=60$ labels (an audit floor). Second, where labels are plentiful, the pessimistic estimate of Eq.~(6) can be replaced by the Clopper--Pearson bound of Section~VII-I.
+
+%% ---------- [F] SECTION IV-D: replace the sentence about LRU ----------
+% old: "If there is none, it evicts the least recently used (LRU) entry; LRU is the default recency rule for a small cache and Section VII-F compares it with plain LRU, LFU and ARC [16]."
+If there is none, it evicts the least recently used (LRU) entry. Section~VII-F compares this default rule with plain LRU, LFU and ARC~\cite{megiddo2003arc}.
+% NOTE: use the same \cite key your .tex uses for reference [16].
+
+%% ---------- [G] SECTION V-E: replace Proposition 5 header sentence and add part (c) + interpretation ----------
+% Keep parts (a) and (b) and their proofs unchanged. After the proof of (b) add:
+
+\emph{(c) Realised harm.} Let $H_k=\sigma_{c(I_k)}U_j$ be the harm with the severity of the true intent and $\sigma_{\max}=\max_c\sigma_c$. Under (A4) and for a served entry with $R_j\le\rho$,
+\[
+  \mathbb{E}[H_k\mid\mathcal{H}_k,j]\;\le\;\sigma_c\,p_{\mathrm{stale}}+\sigma_{\max}\,p_{\mathrm{wrong}}\;\le\;\frac{\sigma_{\max}\rho+\rho^{2}}{\sigma_c}.
+\]
+\emph{Proof.} If the served intent is the true intent, $\sigma_{c(I_k)}=\sigma_c$ and $H_k\le\sigma_c\mathbb{1}[\text{stale}]$. If it is not, $H_k\le\sigma_{\max}\mathbb{1}[\text{wrong}]$. Hence $H_k\le\sigma_c\mathbb{1}[\text{stale}]+\sigma_{\max}\mathbb{1}[\text{wrong}]$, and (A4) gives the first inequality. Write $\sigma_c p_s+\sigma_{\max}p_w=R_j+\sigma_c p_sp_w+(\sigma_{\max}-\sigma_c)p_w$. Since $R_j\le\rho$ implies $p_w\le p_{\mathrm{unsafe}}\le\rho/\sigma_c$, the right-hand side is at most $\rho+\rho^2/\sigma_c+(\sigma_{\max}/\sigma_c-1)\rho$, which is the second inequality. $\blacksquare$
+
+The bound on $H_k$ is looser than the bound on the cost (1) by at most the factor $\sigma_{\max}/\sigma_c$ (5 for static intents). The rule can be made to cover the reported metric directly by scoring $R_j^{+}=\sigma_c p_{\mathrm{stale}}+\sigma_{\max}p_{\mathrm{wrong}}$, which gives $\mathbb{E}[H_k]\le\rho$ under (A4); this variant is more conservative and was not evaluated. In the supplementary run of Section~VII-J, wrong-intent hits that cross classes were absent for RAASC (0.0 per seed on average, against 1.2 for the class-aware TTL cache), so the two harm conventions coincided there; this depends on the generator and need not hold on real traffic.
+
+\emph{How to read $\rho$.} The budget $\rho$ is an operator-set limit on a model-based estimate. It is not a guarantee on the realised rate: the proposition holds only under (A4), which neither selection among candidates, nor selective labels, nor the estimator (6) secure (Sections~V-E, VII-I and VII-K). The realised unsafe rates of Table~I are measurements, and a deployment should monitor the audited unsafe rate against $\rho/\sigma_c$ instead of relying on $\rho$ alone.
+
+%% ---------- [H] SECTION VII-D (Link outage): replace the last sentence "the share of flagged answers that were actually outdated is not reported here." ----------
+The share of flagged answers that were actually outdated or of another intent is not recorded in the reference run of Table~III. It is bounded under (A4): a flagged answer is non-volatile and has $R_{j^*}\le4\rho$, so its probability of being unsafe is at most $4\rho/\sigma_c$, that is $0.20$ for static and $0.10$ for semi-static intents. With 0.87\,\% of queries flagged, at most 0.17 points of all queries can be unsafe flagged answers, against the 0.87 points of queries that are otherwise unanswered. Section~VII-J measures the share directly.
+
+%% ---------- [I] SECTION VII-E: replace the last sentence ("After Holm's correction ...") ----------
+After Holm's correction for the 16 tests of Table~IV, the energy difference to the class-aware TTL cache, the two safety differences to the TTL cache with the limits of Section~V-D, and the two safety differences of the calibration ablation are not significant at the 5\,\% level; the harm difference of the ablation ($p=0.013$) is significant only before the correction. All other differences remain significant.
+
+%% ---------- [J] NEW SUBSECTIONS: insert after Section VII-I (after Table IX paragraph), before Section VIII ----------
+\subsection{Supplementary tests: harm metric, degraded mode and deny-list}
+Three open points of the design are tested with a separate script, \texttt{raasc\_extra.py} (NumPy; 20 seeds; one-week workload with the parameters of Section~VI and the prior of Section~IV-C). It re-implements the generator and the gateway with its own random stream. The absolute hit rates are therefore higher than in Table~I (class-aware TTL: 58.8\,\% against 42.7\,\%), while the unsafe share of the TTL cache (2.6\,\% against 3.1\,\%) and the harm ranking of the policies are comparable. The tables below are compared only within the script, and the results of Sections VII-A to VII-I are not replaced.
+
+\emph{Harm conventions.} Table~X reports the harm with the severity of the true intent and with the severity of the served entry. The two differ by at most 0.1 per 1,000 queries, because wrong-intent hits that cross classes occur only in the TTL caches (1.1 to 1.2 per seed) and not in RAASC.
+
+\begin{table}[t]
+\centering
+\caption{Supplementary run, 0\,\% outage (mean $\pm$ 95\,\% CI over 20 seeds). Harm$_{\mathrm{true}}$: severity of the true intent; Harm$_{\mathrm{srv}}$: severity of the served entry.}
+\label{tab:suppX}
+\footnotesize
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+Policy & Hit \% & Unsafe \% & Harm$_{\mathrm{true}}$ & Harm$_{\mathrm{srv}}$ & Energy (J)\\
+\midrule
+Class TTL & 58.8 $\pm$ 4.6 & 2.60 $\pm$ 0.65 & 29.4 $\pm$ 8.3 & 29.3 & 6.98 $\pm$ 0.69\\
+TTL + inv & 58.8 $\pm$ 4.6 & 1.25 $\pm$ 0.31 & 14.0 $\pm$ 3.9 & 13.8 & 6.98 $\pm$ 0.68\\
+RAASC & 55.2 $\pm$ 4.7 & 0.59 $\pm$ 0.11 & 4.5 $\pm$ 1.1 & 4.5 & 7.69 $\pm$ 0.69\\
+RAASC + inv & 56.5 $\pm$ 4.7 & 0.40 $\pm$ 0.09 & 3.6 $\pm$ 1.0 & 3.6 & 7.49 $\pm$ 0.69\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\emph{Degraded mode.} Table~XI repeats the 10\,\% outage test and counts the flagged answers that were stale or of another intent. Of the flagged answers, 2.1\,\% were unsafe, far below the bound $4\rho/\sigma_c$ of Section~V-E (0.10 to 0.20); in absolute terms this is about 0.005\,\% of all queries. The degraded mode lowers the unanswered share by 0.24 points in this run (the flagged share is smaller than the 0.87\,\% of Table~III because the workload differs), and no unsafe cached answer is added to the unsafe column.
+
+\begin{table}[t]
+\centering
+\caption{Supplementary run at 10\,\% outage (mean $\pm$ 95\,\% CI over 20 seeds).}
+\label{tab:suppXI}
+\footnotesize
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Policy & Unans. \% & Flagged \% & Flagged unsafe \% & Unsafe \%\\
+\midrule
+Class TTL & 4.12 $\pm$ 0.47 & 0 & n/a & 3.06 $\pm$ 0.80\\
+RAASC + inv, no degraded & 4.37 $\pm$ 0.47 & 0 & n/a & 0.45 $\pm$ 0.13\\
+RAASC + inv, degraded & 4.13 $\pm$ 0.47 & 0.24 $\pm$ 0.04 & 2.15 $\pm$ 0.88 & 0.45 $\pm$ 0.13\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\emph{Deny-list.} The deny-list is evaluated on a workload in which all volatile intents and a further 5\,\% of the intents (standing for dosing and emergency instructions) belong to the deny-list categories; they carry about 22\,\% of the queries. The router detects each such query with recall $r$, independently per query. Table~XII shows that without a deny-list the risk rule alone still serves 328 deny-list answers per seed from the cache, of which 1.75 are stale or wrong; these are the non-volatile deny intents, which the severity weights do not exclude and which the policy forbids serving regardless of their age. With $r\ge0.95$ no such answer was served. The price is 1.0 point of hit rate (paired mean difference, $r=1$ against none) and 0.16~J of energy per query. At $r=0.8$ only 1.7 answers per seed leak, because every detected query purges the cached deny-list entries; a router that misses the same intents systematically, rather than independently, would leak more, and this was not simulated.
+
+\begin{table}[t]
+\centering
+\caption{Deny-list with router recall $r$ (RAASC + inv, 0\,\% outage; mean $\pm$ 95\,\% CI over 20 seeds). Leaked: deny-list answers served from the cache per seed (about 20,000 queries).}
+\label{tab:suppXII}
+\footnotesize
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Recall $r$ & Hit \% & Leaked & Leaked unsafe & Energy (J)\\
+\midrule
+No deny-list & 56.5 $\pm$ 4.7 & 328 $\pm$ 98 & 1.75 $\pm$ 1.07 & 7.49 $\pm$ 0.69\\
+0.80 & 55.5 $\pm$ 4.7 & 1.7 $\pm$ 1.5 & 0 & 7.65 $\pm$ 0.70\\
+0.95 & 55.5 $\pm$ 4.7 & 0 & 0 & 7.65 $\pm$ 0.70\\
+1.00 & 55.5 $\pm$ 4.7 & 0 & 0 & 7.65 $\pm$ 0.70\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Calibration with selective labels}
+The coverage test of Section~VII-I draws the labels independently. Here the labelling process of the cache is reproduced for a single similarity bin with true wrong-intent probability $q$ (script \texttt{raasc\_selective.py}; 3,000 runs of 2,000 queries per setting). A candidate is served if the upper estimate of the bin is at most $\rho/\sigma_c=0.05$; a served hit is audited with probability $\epsilon=0.02$; a candidate that is not served is labelled by the cloud. A share $g$ of the candidates is additionally not served for reasons unrelated to the intent (stale entry), and those are labelled as well. The table reports the coverage $\Pr[\hat p\ge q]$ at $q=0.03$ and the share of queries wrongly served in a bin that exceeds the budget share ($q=0.06>0.05$), a direct measure of how often the budget is violated.
+
+Estimator (6) covers only 64 to 81\,\% of the bins, as in Table~IX, and it is worst when the labels come almost only from audits ($g=0$): with an optimistic prior, 53\,\% of the queries of a bin that should not be served are served. The audit floor halves this figure (27\,\%) and raises the coverage from 64 to 77\,\%, at the cost of about 20 extra audits per bin. The Hoeffding bound is safe but serves almost nothing (below 0.3\,\% of the queries at $q=0.03$). The Clopper--Pearson bound keeps the coverage at 96\,\% or more and serves 83\,\% of the queries at $q=0.03$ when $g=0$ (against 96\,\% for (6)), and it limits over-serving to 3.3\,\% at $g=0$. Selective labels thus make the optimistic errors of (6) more persistent when audits are the only labels, and the exact bound is the practical choice where each bin holds a few hundred labels. The cache-level results of Sections VII-A to VII-G use (6) and are unchanged. The calibrator inside the cache simulation was not replaced by the exact bound.
+
+\begin{table}[t]
+\centering
+\caption{Selective labels, one bin, 3,000 runs. Cells: coverage \% at $q=0.03$ / share \% of queries served in a bin with $q=0.06$. $g$: share of staleness-driven misses (free labels).}
+\label{tab:suppXIII}
+\footnotesize
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Estimator & $g=0$ & $g=0.1$ & $g=0.3$\\
+\midrule
+Eq.~(6), $p_0=q$ & 72 / 31.2 & 78 / 12.7 & 81 / 4.9\\
+Eq.~(6), $p_0=q/4$ & 64 / 53.0 & 76 / 18.7 & 79 / 6.9\\
+Eq.~(6), $p_0=q/4$, audit floor & 77 / 27.4 & 78 / 12.9 & 81 / 5.4\\
+Hoeffding & 100 / 0.0 & 100 / 0.0 & 100 / 0.0\\
+Clopper--Pearson & 98 / 3.3 & 96 / 1.2 & 96 / 0.5\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%% ---------- [K] SECTION VIII-C (Threats to validity): append ----------
+Eleventh, the supplementary tests of Sections VII-J and VII-K use a re-implemented generator and a single-bin model; the router recall is applied independently per query, and the audit floor was tested only in the single-bin model. Twelfth, no test with a real sentence encoder and public question data has been run yet; the calibration error of $p_{\mathrm{wrong}}$ on real embeddings is the main open item of Section~VIII-D.
+
+%% ---------- [L] SECTION IX (Conclusion): append after "...class priors." ----------
+The risk bound is conditional on assumption (A4), which selective calibration labels can violate; supplementary tests show that an audit floor and an exact binomial bound reduce, but do not remove, this effect, that the flagged answers of the degraded mode were rarely unsafe, and that a deny-list with high recall removed the leakage of deny-list intents at a cost of about one point of hit rate.

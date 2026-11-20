@@ -1,0 +1,732 @@
+\documentclass[journal]{IEEEtran}
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{tikz}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+
+\hyphenation{op-tical net-works semi-conduc-tor}
+
+% ---- theorem environments -------------------------------------------------
+\newtheorem{proposition}{Proposition}
+\renewcommand{\qedsymbol}{$\blacksquare$}
+\newcommand{\pct}{\,\%}
+\newcommand{\hatlam}{\hat{\lambda}}
+
+% ---- figures cropped (as vector graphics) from the original figure pages -----
+\newcommand{\origfig}[5]{\includegraphics[page=#1,trim=#2 #3 #4 #5,clip,width=\linewidth]{orig_paper.pdf}}
+
+\markboth{THAKUR \MakeLowercase{\textit{et al.}}: RAASC: RISK-AWARE ADAPTIVE SEMANTIC CACHE FOR HEALTHCARE VOICE ASSISTANTS}%
+{THAKUR \MakeLowercase{\textit{et al.}}: RAASC: RISK-AWARE ADAPTIVE SEMANTIC CACHE FOR HEALTHCARE VOICE ASSISTANTS}
+
+\begin{document}
+
+\title{RAASC: A Risk-Aware Adaptive Semantic Cache\\ for Edge--Cloud Healthcare Voice Assistants}
+
+\author{Puja Thakur$^{*}$, Arvind Kumar$^{\dagger}$, and Jagpreet Sidhu$^{\ddagger}$\\
+$^{*}$Department of CSE \& IT, Jaypee University of Information Technology, Waknaghat, Solan, 173234, Himachal Pradesh, India.\\
+$^{\dagger}$STME, NMIMS, Chandigarh, India\\
+Corresponding Author: thakurpuja777@gmail.com\\
+Contributing Authors: arvind.kumar@juit.ac.in; jagpreet.pu@gmail.com}
+
+\maketitle
+
+\begin{abstract}
+A semantic cache at the network edge lets a voice assistant answer repeated questions locally, saving energy and time and surviving link outages. For health information, a cache is also a safety component: a reused answer may be outdated, and a loosely matched question may be a different question. Existing designs use a fixed per-class time-to-live (TTL) and one global similarity threshold; neither adapts. We introduce RAASC, a Risk-Aware Adaptive Semantic Cache that serves an entry only if its severity-weighted risk fits an operator-set budget. The risk combines the probability of an outdated answer, from an update rate learned online from cloud version tags, and of a wrong-intent match, from online calibration of cosine similarity. A clinical deny-list, event-driven invalidation and a flagged degraded mode complete the design. We show that the rule induces an adaptive per-intent reuse limit and state the assumptions under which the budget bounds the expected risk. In a synthetic one-week simulation (20 seeds), RAASC without invalidation lowers unsafe cached responses from 3.14\pct{} to 0.28\pct{} and risk-weighted harm by 89\pct{} relative to a class-aware TTL cache, at a similar hit rate and modelled energy per query (9.28\,J vs 9.39\,J). With a 10\pct{} link outage, RAASC cuts unanswered queries from 10.1\pct{} to 4.7\pct{}. Against a TTL cache that uses RAASC's own reuse limits, the safety difference is not significant, but RAASC gives 4.7 points more hits. Further experiments relate the realised cost to the budget, quantify the selection bias of the calibration labels, audit the content of flagged answers and evaluate the deny-list with imperfect recall. The workload is synthetic, and no clinical safety claim is made.
+\end{abstract}
+
+\begin{IEEEkeywords}
+voice assistants, healthcare, edge computing, semantic caching, risk-aware caching, cache freshness, calibration, energy efficiency
+\end{IEEEkeywords}
+
+\IEEEpeerreviewmaketitle
+
+\section{Introduction}
+\IEEEPARstart{V}{OICE} interfaces are turning into a practical means of accessing digital health services. Patients can inquire about medications, clinic schedules or discharge instructions without typing, which is important for older adults and for individuals with motor or visual impairments. Today, most voice assistants transmit every spoken request to cloud servers. The cloud provides access to large language models and clinical databases, but each request then relies on network quality, introduces seconds of delay and keeps radios and processors active \cite{montoya2025,speckhard2023}. Edge computing brings part of this work closer to the user \cite{shi2016,satya2017,zhou2019}, and caching at the edge is among its oldest and most effective techniques \cite{wang2014,breslau1999}.
+
+Caching health information is difficult because answers change. A cache without a time limit will sooner or later return outdated answers. A fixed time limit for each data class reduces the problem but does not remove it. A low similarity threshold makes the cache return answers that were meant for a different question. A cached reply about an appointment slot or a laboratory value that has since changed is worse than a slow reply. A TTL cache has four structural weaknesses in this setting:
+\begin{enumerate}
+\item \emph{Class-level freshness, not intent-level.} The TTL is fixed for a whole class of data, although each intent changes at its own, uncertain rate.
+\item \emph{A single similarity threshold.} One global threshold $\tau$ ignores that the cost of a wrong answer depends on the clinical class of the data. Its safe value also depends on the embedding model and the question set, so it must be re-tuned on real traffic.
+\item \emph{No feedback.} The cache does not learn from the cloud answers that are fetched anyway on every miss.
+\item \emph{All-or-nothing outage behaviour.} When the link is down and the cache cannot answer, the assistant simply fails, although a slightly aged static answer could have been useful and safe enough if it had been labelled as such.
+\end{enumerate}
+This paper proposes RAASC, which replaces the two fixed rules (TTL and $\tau$) with one decision rule: serve a cached answer only if its estimated, severity-weighted risk is within a budget. The risk is estimated online from signals that the system already receives. The contributions are:
+\begin{itemize}
+\item a formulation of semantic-cache serving as a risk-budgeted decision that combines staleness risk, calibrated wrong-intent risk and clinical severity (Sections~\ref{sec:problem} and~\ref{sec:design});
+\item three online adaptation mechanisms that need no infrastructure beyond version tags and cloud answers: a per-intent update-rate estimator, a bin-wise similarity calibrator fed by cloud-resolved misses and shadow audits, and risk-based admission and eviction, together with a flagged degraded mode for link outages and a mandatory clinical deny-list (Section~\ref{sec:design});
+\item a theoretical analysis of the estimators, of the reuse limit implied by the risk rule, of the conditions under which the budget bounds the expected severity-weighted risk, and of the energy trade-off (Section~\ref{sec:theory});
+\item a reference implementation (\texttt{raasc\_sim.py}) and a seeded evaluation against a class-aware TTL baseline and further baselines, with paired statistical tests, an ablation, a stress test of the rate estimator and an outage test (Sections~\ref{sec:setup} and~\ref{sec:results});
+\item an analytical sensitivity study of the reuse limit (Section~\ref{sec:sens}), an estimator-level coverage test of the wrong-intent calibrator (Section~\ref{sec:coverage}) and a protocol for validating the design on real sentence embeddings and public question data (Section~\ref{sec:protocol});
+\item an extended evaluation that relates the realised cost of served answers to the budget, specifies and stress-tests the calibration prior, measures the selection bias of the calibration labels, audits the content of flagged answers and evaluates the deny-list with imperfect router recall (Sections~\ref{sec:consistency}--\ref{sec:denylist}).
+\end{itemize}
+
+\textbf{Scope.} RAASC is a healthcare-motivated design, not a clinically validated system. The evaluation is a seeded simulation with assumed severities, update rates and traffic. Its purpose is to expose the structure of the trade-off between safety, availability and energy, and to test the estimators under controlled conditions. Section~\ref{sec:protocol} states the protocol for the next step, a validation on real sentence embeddings and public question data.
+
+\textbf{Organisation.} Section~\ref{sec:related} reviews related work. Section~\ref{sec:problem} formulates the problem and Section~\ref{sec:design} describes the RAASC design: the risk model, the online adaptation, admission and eviction, the degraded mode, the clinical deny-list and the per-query algorithm. Section~\ref{sec:theory} gives the theoretical analysis. Section~\ref{sec:setup} describes the experimental setup, and Section~\ref{sec:results} reports the results, including the additional analyses of Sections~\ref{sec:consistency}--\ref{sec:denylist}. Section~\ref{sec:discussion} discusses safety, deployment, limitations and a validation protocol, and Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}\label{sec:related}
+\subsection{Edge intelligence and voice assistants}
+Edge computing places computation near the data source to cut delay and bandwidth use \cite{shi2016}. Edge intelligence extends this to machine-learning inference and training \cite{zhou2019}. Splitting a neural network between device and cloud can reduce delay and mobile energy \cite{kang2017}. For always-on audio, platform-aware neural architecture search \cite{tan2019,golovin2017} has produced compact models. Speckhard \emph{et al.} optimise accuracy, memory and measured energy, and find networks that use about ten times less energy than MobileNetV2 \cite{sandler2018} at similar accuracy \cite{speckhard2023}. This builds on depthwise-separable architectures \cite{sandler2018,howard2017}, spectrogram CNNs \cite{hershey2017} and AudioSet \cite{gemmeke2017}. For voice assistants specifically, CHA caches repeated actions in home assistants \cite{xu2020}. Montoya Benitez \emph{et al.} cache question--answer pairs on a Raspberry Pi, match paraphrases by sentence-embedding similarity and model energy as $E = P\cdot t$ \cite{montoya2025}. None of these works deals with the staleness of cached answers, which is decisive in healthcare.
+
+\subsection{Caching, popularity and semantic matching}
+Web and content request streams follow Zipf-like popularity \cite{breslau1999}, which is why a small cache can serve a large share of requests. Replacement policies such as ARC adapt between recency and frequency without manual tuning \cite{megiddo2003}. Edge caching has also been studied widely for 5G content delivery \cite{wang2014}.
+
+Semantic caching replaces exact-match keys with embedding similarity. Sentence encoders such as Sentence-BERT produce embeddings whose cosine similarity reflects paraphrase \cite{reimers2019}, and GPTCache uses this idea to reduce the cost and delay of large-language-model applications \cite{bang2023}. The cloud side of a health assistant is likely to use retrieval-augmented generation \cite{lewis2020} and LLMs that encode clinical knowledge \cite{singhal2023} but can still hallucinate \cite{ji2023}. A cache must therefore not amplify errors, and its own mistakes must be measurable.
+
+\subsection{Freshness and consistency}
+Leases limit how long a cached copy may be trusted without revalidation \cite{gray1989}. Freshness-aware synchronisation chooses revisit policies from the change rate of each object \cite{cho2000}. Age of information (AoI) studies how often a status must be updated to stay timely \cite{kaul2012,yates2021}. Changing data also cause concept drift, which a learned component must follow \cite{gama2014}. These works treat staleness as a property of the object. RAASC uses it as one term of a clinical risk score and learns the change rate of each intent online from version tags.
+
+\subsection{Calibration and risk}
+Raw similarity scores are not probabilities. Modern models are often badly calibrated and benefit from a post-hoc mapping to observed frequencies \cite{guo2017}. Conformal prediction gives distribution-free guarantees on error rates when the calibration data are exchangeable \cite{angelopoulos2021}, and conditional value-at-risk formalises optimisation under tail losses \cite{rockafellar2000}. RAASC uses a simple and auditable calibrator (bin-wise counts with a pessimistic point estimate) and leaves formal distribution-free guarantees to future work.
+
+\subsection{Learned thresholds and verified semantic caches}
+A single global threshold, as in GPTCache \cite{bang2023}, cannot bound the error rate of a semantic cache, and the best threshold differs between cached prompts. vCache learns a separate threshold for each cached prompt online and enforces a user-defined maximum error rate \cite{schroeder2026}. It is the closest work to the calibration part of RAASC, since both estimate online whether a similarity match is correct and both are controlled by an operator-set bound. RAASC differs in scope: it also accounts for answers that become outdated over time, it weights errors by a clinical severity, and it adds a deny-list and a flagged degraded mode for link outages. Its calibrator is deliberately simpler (bin-wise counts, Section~\ref{sec:calibrator}), and its bound on the error holds only under assumption (A4) of Section~\ref{sec:bound}.
+
+\subsection{Voice-biomarker analytics}
+Voice analytics can support telemonitoring of Parkinson's disease \cite{little2009}, reach high classification accuracy \cite{tsanas2012} and capture speech abnormalities linked to disease risk on smartphones \cite{rusz2018}, but accuracy falls outside supervised conditions: Carr\'on \emph{et al.} found an accuracy of 0.92 under supervision but 0.71 in free-living recordings, and near-chance transfer between databases \cite{carron2021}, using the public mPower data \cite{bot2016}. The analytics path of the architecture therefore follows the semi-controlled protocol recommended in \cite{carron2021}. It is not evaluated in this paper.
+
+\textbf{Positioning.} Prior work treats energy-efficient perception, response caching, freshness management and calibrated decision-making separately. RAASC combines the last three inside the edge cache of a healthcare assistant, adds a clinical severity weight and a mandatory deny-list, and measures the resulting trade-off between safety and energy.
+
+\section{Problem Formulation}\label{sec:problem}
+\textbf{Setting.} A clinic or home gateway receives de-identified query embeddings $\mathbf{q}_k$ at times $t_k$. Each query has a hidden intent $I_k$ out of $K$ intents. Each intent $i$ belongs to a volatility class $c(i)\in\{\text{static},\text{semi-static},\text{volatile}\}$, and its correct answer is replaced by Poisson updates at rate $\lambda_i$. The cache holds at most $C$ entries. Entry $j$ stores an embedding $\mathbf{e}_j$, the intent $i_j$ it was fetched for and its fetch time $t_j$. The cloud always returns a correct, current answer together with a version tag.
+
+\textbf{Unsafe response.} We call the response to query $k$ unsafe, $U_j=1$, when the served entry $j$ fails in at least one of two ways. It may answer a different question than the one asked ($i_j\neq I_k$), which we call a wrong-intent hit. Or the correct answer for its intent may have changed after the entry was fetched at time $t_j$, which we call a stale hit. Otherwise $U_j=0$. Every volatility class $c$ carries a severity weight $\sigma_c$ that reflects the clinical cost of handing out an unsafe answer in that class. We set $\sigma_c=1$, 2 and 5 for static, semi-static and volatile intents. These values are placeholders for the simulation. In a real deployment, clinical governance must determine them and review them periodically.
+
+\textbf{Decision problem.} For each incoming query, the gateway either serves a cached entry or forwards the query to the cloud. During a link outage it has two more options: answer with a flagged cached entry, or fail. Let $U_j\in\{0,1\}$ indicate that serving entry $j$ to query $k$ produces a stale or wrong-intent answer, and let $\sigma_c$ be the severity weight of the entry's class. The expected clinical cost of serving $j$ is
+\begin{equation}
+C_j=\sigma_c\cdot\Pr[U_j=1\mid j\text{ is served}]\label{eq:cost}
+\end{equation}
+The cost~\eqref{eq:cost} is controlled for each decision using estimated probabilities. Section~\ref{sec:theory} states the conditions under which the realised value follows the estimate, and the experiments measure the realised value. Note that~\eqref{eq:cost} weights an unsafe answer by the class of the \emph{served entry}, whereas the harm metric of the evaluation (Section~\ref{sec:setup}) weights it by the class of the \emph{true intent} of the query; the two coincide for stale hits and differ only for wrong-intent hits that cross classes. Section~\ref{sec:consistency} reports both and relates them to the budget.
+
+\section{RAASC Design}\label{sec:design}
+\subsection{Overview}
+Fig.~\ref{fig:arch} shows where RAASC sits. The patient tier (always-on wake word, offline speech-to-text, local text-to-speech) and the cloud tier (question answering, EHR access, voice-biomarker analytics) are standard components. The edge gateway keeps the privacy filter, an intent router that applies the clinical deny-list (Section~\ref{sec:denydesign}), the embedder and the semantic cache store. In place of a fixed TTL-and-threshold rule, it uses a risk scorer fed by three learners: an update-rate estimator, a similarity calibrator and a shadow auditor. The cloud adds two signals: a version tag on every answer and, optionally, an event whenever a protocol, label or schedule is edited.
+
+\begin{figure*}[!t]
+\centering
+\origfig{4}{61.5pt}{540.5pt}{62pt}{54.5pt}
+\caption{Proposed RAASC edge--cloud architecture. The accent colour marks the new components. Arrows into the scorer carry the estimates it uses. The double arrow to the cache store is lookup and insertion. The right-hand arrows are cache misses, the cloud's replies, and update events pushed to the cache.}
+\label{fig:arch}
+\end{figure*}
+
+\subsection{Risk model}\label{sec:risk}
+For a query embedding $\mathbf{q}$ and a candidate entry $j$ with cosine similarity $s_j=\cos(\mathbf{q},\mathbf{e}_j)\ge s_{\min}$, RAASC computes two probabilities. The staleness probability uses the estimated update rate $\hatlam_i$ of the entry's intent. This rate is reduced by the fraction $\kappa$ of updates that are pushed to the gateway. A pushed update removes the entry at once, so only unpushed updates remain a risk:
+\begin{equation}
+1-p_{\text{stale}}(j)=\exp\!\big(-(1-\kappa_c)\,\hatlam_i\,(t-t_j)\big),\label{eq:stale}
+\end{equation}
+The wrong-intent probability is read from the calibrator (Section~\ref{sec:calibrator}), $p_{\text{wrong}}(s_j)$. The two are combined as if they were independent (Section~\ref{sec:bound} bounds the effect of this assumption) and multiplied by the severity of the entry's class:
+\begin{align}
+p_{\text{unsafe}}(j)&=p_{\text{stale}}(j)+p_{\text{wrong}}(s_j)-p_{\text{stale}}(j)\,p_{\text{wrong}}(s_j),\nonumber\\
+R_j&=p_{\text{unsafe}}(j)\cdot\sigma_c.\label{eq:unsafe}
+\end{align}
+The scorer picks the candidate with the lowest risk, $j^{*}=\arg\min_j R_j$. This is not always the most similar entry: a slightly less similar but fresher entry can win. The scorer serves it from the cache if and only if
+\begin{equation}
+\min_j R_j\le\rho.\label{eq:budget}
+\end{equation}
+Otherwise the query is a miss. Because the severity $\sigma_c$ is larger for volatile data, appointment slots and patient-specific results are rarely served from the cache. RAASC does not rely on this effect, however: such queries are excluded explicitly by the clinical deny-list of Section~\ref{sec:denydesign}.
+
+\subsection{Online adaptation}\label{sec:calibrator}
+Three mechanisms keep the inputs of~\eqref{eq:stale}--\eqref{eq:budget} realistic (Fig.~\ref{fig:signals}).
+
+\textbf{Update-rate estimator.} Every cloud answer carries a version tag that acts as a monotone change counter (a hash would only show whether something changed). When intent $i$ is fetched again, we add the number of changes $n_i$ since the previous fetch and the exposure time $T_i$ to running totals. The rate is the posterior mean of a Gamma prior centred on the modelled update interval $I_c$ of the class:
+\begin{equation}
+\hatlam_i=\frac{n_i+\alpha_0}{T_i+\alpha_0 I_c},\qquad \alpha_0=2\label{eq:rate}
+\end{equation}
+An intent that never changes therefore earns a longer reuse time. An intent that changes often is reused for less time than its class suggests.
+
+\textbf{Similarity calibrator.} Cosine similarity is split into ten bins of width 0.05 above $s_{\min}=0.50$. Each bin keeps a count of wrong-intent matches $w_b$ out of $n_b$ labelled matches, and a prior $p_0(b)$ that decreases as similarity rises, weighted as $n_0=8$ pseudo-observations. The prior of bin $b$ is
+\begin{equation}
+p_0(b)=\min\!\Big\{0.99,\ \max\!\Big\{0.005,\ \Big[1+\exp\!\Big(\tfrac{s_b-0.75}{0.04}\Big)\Big]^{-1}\Big\}\Big\},\tag{5a}\label{eq:prior}
+\end{equation}
+where $s_b$ is the mid-point of bin $b$. It is a weak, monotone assumption (a logistic curve centred at a cosine of 0.75, clipped to $[0.005,0.99]$) and not a fitted quantity; its ten values are listed in Table~\ref{tab:prior}, and Section~\ref{sec:prior} tests three alternatives. The wrong-intent probability is the posterior mean plus one standard deviation, which makes the estimate more cautious than the posterior mean where data are scarce, although it is not a confidence bound (Section~\ref{sec:calibtheory}):
+\begin{align}
+m_b&=\frac{n_0\,p_0(b)+w_b}{n_0+n_b},\nonumber\\
+p_{\text{wrong}}&=\min\!\left\{1,\ m_b+\sqrt{\frac{m_b(1-m_b)}{n_b+n_0+1}}\right\}\label{eq:wrong}
+\end{align}
+
+\textbf{Labels at no extra cost.} Every cache miss already calls the cloud. The chosen candidate $j^{*}$ can therefore be labelled right or wrong for free, by comparing its intent $i_{j^{*}}$ with the intent that the cloud resolved. We assume that the cloud returns an identifier of the canonical question or knowledge-base entry that produced the answer, so that the label is an identifier comparison; the evaluation of Section~\ref{sec:setup} follows this assumption and does not simulate label noise. If only free text were returned, an answer-equivalence model would be needed, and its errors would enter the calibrator as label noise (Section~\ref{sec:threats}). Cache hits are not labelled this way, so a shadow auditor re-checks a random fraction $\varepsilon$ of served hits. The audit runs asynchronously, off the response path: the cached answer is spoken at once, and the label reaches the calibrator when the cloud reply arrives (its energy is counted in the results). This also lets the calibrator follow drift in the question distribution \cite{gama2014}. Because miss labels cover only the best-scoring candidate of queries that were \emph{not} served, the label set is a selected sample; Section~\ref{sec:selection} measures the resulting bias.
+
+
+\subsection{Admission and eviction}\label{sec:admission}
+An answer fetched from the cloud is cached only if it could be reused for a useful time within the budget. That is, the time until its staleness risk alone reaches the budget must be at least $L_{\min}=30\,$s:
+\begin{equation}
+L_i=\frac{\ln\!\Big[\dfrac{1}{1-\min(\rho/\sigma_c,\,0.999)}\Big]}{(1-\kappa_c)\,\hatlam_i}\ \ge\ L_{\min}\label{eq:admit}
+\end{equation}
+When the cache is full, RAASC first evicts an entry whose staleness risk already exceeds the budget (the oldest such entry). If there is none, it evicts the least recently used (LRU) entry; LRU is the default recency rule for a small cache and Section~\ref{sec:baselines} compares it with plain LRU, LFU and ARC \cite{megiddo2003}. Pushed update events remove the affected entries immediately. Admission considers staleness alone because the wrong-intent risk depends on the future query, which is unknown when the answer is stored. The value $L_{\min}=30\,$s is a design parameter that was not tuned: with the parameters of Section~\ref{sec:setup} the class-level limits of Section~\ref{sec:reuse} (3\,s, 73\,min and 3.1\,d) are separated by orders of magnitude, so at the default budget any value from just above 3\,s to below 36\,min gives the same class-level admission decisions. The choice starts to matter for budgets near 0.40, where the volatile limit reaches 25\,s (Table~\ref{tab:limits}), and its effect on individual intents was not evaluated.
+
+\begin{figure}[!t]
+\centering
+\origfig{4}{312.5pt}{153pt}{50pt}{325pt}
+\caption{RAASC query-handling flowchart at the edge gateway. After any branch, the answer is spoken by the local text-to-speech engine. Branches that end in a cloud call also feed the learners (Fig.~\ref{fig:signals}). The clinical deny-list check of Algorithm~\ref{alg:raasc} (line~2) precedes this flow and is omitted from the figure.}
+\label{fig:flow}
+\end{figure}
+
+\begin{figure*}[!t]
+\centering
+\origfig{5}{70pt}{560pt}{70.5pt}{54.5pt}
+\caption{The three feedback signals. Rate estimation uses version tags, calibration uses miss and audit labels, and invalidation uses pushed update events. Every miss and every audited hit produces a new label, so the estimates follow the traffic.}
+\label{fig:signals}
+\end{figure*}
+
+
+\subsection{Degraded mode}\label{sec:degraded}
+If the cloud link is down and no entry meets~\eqref{eq:budget}, the best candidate is still served, with a spoken and displayed warning that the information may be outdated. This happens only when its class is not volatile and $R_{j^{*}}\le 4\rho$. The factor 4 is a heuristic design choice, not a derived value: it caps the estimated risk of a flagged answer at $4\rho=0.2$ for the default budget, a looser bound that is accepted because the answer is labelled as possibly outdated; Section~\ref{sec:degaudit} audits the flagged answers and varies the factor. Otherwise the assistant apologises and queues the request. Flagged answers are counted separately in the results, so they never hide in the unsafe-response statistics.
+
+\subsection{Clinical deny-list}\label{sec:denydesign}
+Before any lookup, the gateway's intent router checks the query against a mandatory deny-list $D$ that covers patient-specific laboratory results, medication dosing and treatment changes, emergency and time-critical instructions, appointment availability and scheduling, and patient-specific discharge instructions. A matched query bypasses the cache: it is answered by the cloud (or queued if the link is down), its answer is never admitted, and any cached entry whose intent falls into these categories is purged. The deny-list is a hard rule that does not depend on the risk score or the severity weights. Its recall is that of the router, which may be rule-based (intent labels, keywords, entity types) or a classifier, and it must be validated clinically. The workload of Section~\ref{sec:setup} used for Tables~\ref{tab:main}--\ref{tab:coverage} does not exercise it, so those tables report the risk rule alone; Section~\ref{sec:denylist} evaluates the deny-list separately, on a workload with a deny category and with router recall below one.
+
+\subsection{Algorithm and flow}\label{sec:algo}
+Algorithm~\ref{alg:raasc} gives the per-query procedure, and Fig.~\ref{fig:flow} shows the same logic as a flowchart. Scoring is a matrix--vector product over at most $C$ embeddings plus $O(C)$ scalar operations, which is the same order as a plain cache lookup. Updates of the rate estimator and the calibrator cost $O(1)$.
+
+\begin{algorithm}[!t]
+\caption{RAASC query handling}\label{alg:raasc}
+\begin{algorithmic}[1]
+\Require query embedding $\mathbf{q}$, time $t$, cache $\mathcal{C}$, budget $\rho$, similarity floor $s_{\min}$, clinical deny-list $D$
+\State apply pushed invalidations up to time $t$
+\If{$\mathbf{q}$ matches $D$}
+\State bypass the cache (answer from the cloud, or queue if the link is down), do not insert, purge cached entries that match $D$; \textbf{return}
+\EndIf
+\State $\mathit{Cand}\leftarrow\{\,j\in\mathcal{C}:\cos(\mathbf{q},\mathbf{e}_j)\ge s_{\min}\,\}$; $j^{*}\leftarrow\text{none}$
+\If{$\mathit{Cand}\neq\emptyset$}
+\State compute $p_{\text{stale}}$ (Eq.~\ref{eq:stale}), $p_{\text{wrong}}$ (Eq.~\ref{eq:wrong}), $R_j$ (Eq.~\ref{eq:unsafe}) for each $j\in\mathit{Cand}$; $j^{*}\leftarrow\arg\min_j R_j$
+\EndIf
+\If{$j^{*}$ exists \textbf{and} $R_{j^{*}}\le\rho$}
+\State serve $j^{*}$ from cache; \textbf{then}
+\State with probability $\varepsilon$: schedule an asynchronous shadow audit of $j^{*}$; \textbf{return}
+\EndIf
+\If{cloud link is up}
+\State fetch answer and version tag; send the fresh answer to the user
+\State \textbf{then}, if $j^{*}$ exists: label $j^{*}$ (same / different intent as the cloud-resolved intent), update calibrator
+\State update rate estimate of the resolved intent (Eq.~\ref{eq:rate})
+\State if lifetime $L\ge L_{\min}$ (Eq.~\ref{eq:admit}): insert (evict risk-expired entry, else LRU)
+\ElsIf{link down \textbf{and} $j^{*}$ exists, class$(j^{*})$ is not volatile \textbf{and} $R_{j^{*}}\le 4\rho$}
+\State serve $j^{*}$ flagged as outdated
+\Else
+\State apologise and queue the request
+\EndIf
+\end{algorithmic}
+\end{algorithm}
+
+\section{Theoretical Analysis}\label{sec:theory}
+This section specifies what the design ensures and what it does not guarantee. Throughout, $p_{\text{stale}}$, $p_{\text{wrong}}$ and $R_j$ are estimates computed by the gateway, and the true probabilities are written $\pi_{\text{stale}}$ and $\pi_{\text{wrong}}$. We rely on three modelling assumptions: (A1) updates of each intent follow a Poisson process with rate $\lambda_i$, independent across intents; (A2) each update is pushed to the gateway independently with probability $\kappa_c$; (A3) the cloud answer is correct and its version tag is an accurate monotone change counter. Proposition~\ref{prop:bound} adds a fourth assumption about the estimates of the selected entry. The results below hold only under these assumptions and are not certified safety guarantees.
+
+\subsection{Update-rate estimator}\label{sec:estimator}
+Let $n$ updates be observed over an exposure time $T$ that is fixed in advance or chosen independently of the update process, so that $n\sim\mathrm{Poisson}(\lambda T)$ under (A1).
+
+\begin{proposition}[bias and consistency]\label{prop:bias}
+The estimator~\eqref{eq:rate} satisfies $\mathbb{E}[\hatlam]-\lambda=\alpha_0(1-\lambda I_c)/(\alpha_0 I_c+T)$, and $\hatlam\to\lambda$ almost surely as $T\to\infty$.
+\end{proposition}
+\begin{proof}
+Taking expectations in~\eqref{eq:rate} gives $(\alpha_0+\lambda T)/(\alpha_0 I_c+T)$; subtracting $\lambda$ yields the bias. As $T\to\infty$, $n/T\to\lambda$ almost surely by the strong law for Poisson processes, and the prior terms vanish relative to $T$.
+\end{proof}
+The bias decays as $1/T$ and is zero when the class prior is correct ($\lambda=1/I_c$). The estimator therefore only changes decisions when an intent deviates from its class, a point that matters for the ablation in Section~\ref{sec:ablation}.
+
+\textbf{Remark.} The bias formula conditions on $T$. In the gateway a window ends at the next fetch of the intent, and a pushed update shortens it, so $T$ is not independent of the updates and the formula is only approximate. Consistency is not affected: $n-\lambda T$ is a martingale in the exposure time, so $\mathbb{E}[n]=\lambda\,\mathbb{E}[T]$ for windows that end at stopping times with finite mean (optional stopping), and the pooled ratio $n/T$ converges to $\lambda$ almost surely as $T\to\infty$ by the strong law for martingales.
+
+\subsection{Staleness under pushed invalidation}\label{sec:thinning}
+\begin{proposition}[thinning]\label{prop:thin}
+Under (A1) and (A2), the updates that are not pushed form a Poisson process of rate $(1-\kappa_c)\lambda_i$. Hence for an entry of age $a=t-t_j$ whose pushed events have not arrived, $\Pr[\text{stale}]=1-\exp(-(1-\kappa_c)\lambda_i a)$, which is~\eqref{eq:stale} with $\lambda_i$ known.
+\end{proposition}
+\begin{proof}
+Independent thinning of a Poisson process with retention probability $1-\kappa_c$ gives a Poisson process with the stated rate; the probability of at least one event in a window of length $a$ is one minus the zero-count probability.
+\end{proof}
+
+\subsection{Wrong-intent calibrator}\label{sec:calibtheory}
+The statistic $m_b$ in~\eqref{eq:wrong} is the posterior mean of a Beta distribution with $n_0p_0(b)+w_b$ and $n_0(1-p_0(b))+n_b-w_b$ pseudo-counts, and the margin added in~\eqref{eq:wrong} is its posterior standard deviation. The estimate $p_{\text{wrong}}$ is therefore a pessimistic point estimate, not a confidence bound.
+
+\begin{proposition}[vanishing margin]\label{prop:margin}
+The margin added in~\eqref{eq:wrong} satisfies $p_{\text{wrong}}-m_b\le 1/\big(2\sqrt{n_b+n_0+1}\big)$ (unless the cap at 1 is active), and $m_b\to w_b/n_b$ as $n_b\to\infty$.
+\end{proposition}
+\begin{proof}
+Since $m_b(1-m_b)\le 1/4$, the square-root term in~\eqref{eq:wrong} is at most $\tfrac12(n_b+n_0+1)^{-1/2}$. The prior weight $n_0/(n_b+n_0)$ tends to zero as $n_b$ grows.
+\end{proof}
+The margin therefore shrinks as labels accumulate, but it is a heuristic. A posterior standard deviation describes uncertainty about the bin frequency under the Beta model; it is not an upper confidence bound on the true wrong-intent probability. A guaranteed alternative, based on Hoeffding's inequality \cite{hoeffding1963}, is the bound $\pi_{\text{wrong}}\le w_b/n_b+\sqrt{\ln(1/\delta)/(2n_b)}$, which holds with probability at least $1-\delta$ if the labels of bin $b$ are independent draws with a common wrong-intent probability. For $\delta=0.05$ and $n_b=185$ labels its margin is 0.09. Replacing~\eqref{eq:wrong} by the minimum of 1 and this bound would make the wrong-intent part of (A4) hold with probability at least $1-\delta$ per bin and evaluation, under the label assumption, at the price of a wider margin. The cache-level experiments of Section~\ref{sec:results} use~\eqref{eq:wrong}, not this bound, so they measure the realised unsafe rate and do not verify (A4); Section~\ref{sec:coverage} compares~\eqref{eq:wrong}, the Hoeffding bound and the exact binomial bound as estimators of the wrong-intent probability in isolation, and Section~\ref{sec:selection} repeats the comparison on the labels that the cache itself produces. The independence assumption on labels is itself only approximate, because miss labels cover the best-scoring candidate only and audit labels a random fraction of hits (Section~\ref{sec:bound}). To estimate the wrong-intent rate of a bin to within $\eta$ with confidence $1-\delta$, Hoeffding's inequality requires $n_b\ge\ln(2/\delta)/(2\eta^2)$ labels, which is 185 labels for $\eta=0.1$ and $\delta=0.05$.
+
+\subsection{Implied adaptive reuse limit}\label{sec:reuse}
+The risk rule~\eqref{eq:budget} induces an age limit for every cached entry, which replaces the fixed TTL.
+
+\begin{proposition}[adaptive reuse limit]\label{prop:reuse}
+Let the wrong-intent estimate of entry $j$ satisfy $p_{\text{wrong}}(s_j)<\rho/\sigma_c$. Then entry $j$ satisfies~\eqref{eq:budget} if and only if its age is at most
+\begin{equation}
+a_{\max}=\frac{\ln\!\Big[\dfrac{1-p_{\text{wrong}}}{1-\rho/\sigma_c}\Big]}{(1-\kappa_c)\,\hatlam_i}\label{eq:amax}
+\end{equation}
+\end{proposition}
+\begin{proof}
+\eqref{eq:budget} is equivalent to $p_{\text{unsafe}}\le\rho/\sigma_c$, that is $(1-p_{\text{stale}})(1-p_{\text{wrong}})\ge 1-\rho/\sigma_c$. Substituting~\eqref{eq:stale} and solving for the age gives~\eqref{eq:amax}; the condition $p_{\text{wrong}}<\rho/\sigma_c$ makes the argument of the logarithm exceed one.
+\end{proof}
+For $p_{\text{wrong}}=0$,~\eqref{eq:amax} reduces to the admission limit $L_i$ in~\eqref{eq:admit}. The limit shrinks as the update rate, the severity or the wrong-intent estimate grows, and it grows with the push coverage. With the parameters of Section~\ref{sec:setup} ($\rho=0.05$, $\kappa=0.5,0.5,0$ and prior intervals of 30\,d, 1\,d and 5\,min), the limits at $p_{\text{wrong}}=0$ are about 3.1 days for static intents, 73\,min for semi-static intents and 3.0\,s for volatile intents; without invalidation (push coverage zero) they are about 1.5 days, 36\,min and 3.0\,s. The volatile limit is below $L_{\min}$, so volatile answers are never admitted, as intended. For the static and semi-static classes the limits are shorter than the 7\,d and 6\,h of the TTL baseline, which is consistent with the lower unsafe rate in Section~\ref{sec:results}; since the simulated update rates equal the class priors (Section~\ref{sec:ablation}), the shorter limits account for most of that reduction, as a TTL cache with exactly these limits shows (Section~\ref{sec:baselines}).
+
+\subsection{Conditional bound on the expected risk}\label{sec:bound}
+\begin{proposition}[conditional expected-risk bound]\label{prop:bound}
+Let entry $j$ be selected and served for query $k$ (so $R_j\le\rho$), and let $H_k$ be the history available to the gateway. Assume (A4): conditionally on $H_k$ and on the selection of $j$, the estimates are conservative, i.e.\ $\hatlam_i\ge\lambda_i$ and $p_{\text{wrong}}(s_j)\ge\pi_{\text{wrong}}(s_j)=\Pr[i_j\neq I_k\mid s_j,H_k]$. Then (a) if staleness and wrong intent are conditionally independent, $\sigma_c\cdot\Pr[U_j=1\mid H_k,j]\le R_j\le\rho$; (b) with no assumption on their dependence, the same quantity is at most $R_j/(1-R_j/(2\sigma_c))\le\rho/(1-\rho/2)$.
+\end{proposition}
+\begin{proof}
+(a) By (A1), (A2) and Proposition~\ref{prop:thin}, $\pi_{\text{stale}}=1-\exp(-(1-\kappa_c)\lambda_i a)\le p_{\text{stale}}$ when $\hatlam_i\ge\lambda_i$, because the expression increases with the rate. Under independence $\Pr[U_j=1]=1-(1-\pi_{\text{stale}})(1-\pi_{\text{wrong}})$, which increases in both arguments and is therefore at most $p_{\text{unsafe}}(j)$. Multiplying by $\sigma_c$ gives $R_j$, and~\eqref{eq:budget} gives $R_j\le\rho$. (b) By the union bound, $\Pr[U_j=1]\le\pi_{\text{stale}}+\pi_{\text{wrong}}\le s:=p_{\text{stale}}+p_{\text{wrong}}$. Let $r=R_j/\sigma_c=s-p_{\text{stale}}p_{\text{wrong}}$. Since $p_{\text{stale}}p_{\text{wrong}}\le s^2/4$ and $s\le 2$, we get $r\ge s(1-s/4)\ge s/2$. Hence $s\le 2r$, so $r\ge s(1-r/2)$ and $s\le r/(1-r/2)$. Multiplying by $\sigma_c\ge 1$ and using $R_j\le\rho$ gives the claim.
+\end{proof}
+The proposition bounds an expected, severity-weighted risk under (A4); it does not certify safety. (A4) does not follow from conservative estimators on average, for three reasons. First, taking the minimum of $R_j$ over the candidates favours entries whose risk is under-estimated (selection bias). Second, miss labels cover only the best-scoring candidate and audit labels only a random 2\pct{} of hits, so high-similarity bins are calibrated from few and non-random labels. Third, the estimators~\eqref{eq:rate} and~\eqref{eq:wrong} are not conservative by construction:~\eqref{eq:rate} is a posterior mean, and Section~\ref{sec:coverage} shows that the coverage of~\eqref{eq:wrong} stays below 90\pct{} in all tested settings. Part (b) removes the independence assumption at a cost of at most the factor $1/(1-\rho/2)$, which is 2.6\pct{} at $\rho=0.05$ and 11\pct{} at $\rho=0.20$, but it does not remove (A4). A distribution-free guarantee would need conformal calibration \cite{angelopoulos2021} and is left to future work. Flagged answers in degraded mode are bounded in the same way by $4\rho$ for non-volatile classes. In the experiments the realised unsafe rate is measured (Table~\ref{tab:main}), not guaranteed; Section~\ref{sec:consistency} compares the realised severity-weighted cost per served answer with the budget, and Section~\ref{sec:selection} measures the selection bias named above. The rule~\eqref{eq:unsafe} differs from the union-bound rule, which uses the sum of the two probabilities, by the class severity times their product; for any served entry this difference is at most $\rho^2/\big(4(1-\rho/2)^2\big)$, about 0.0007 at $\rho=0.05$. The generator of Section~\ref{sec:setup} draws updates independently of the questions, so the experiments cannot test dependence between the two events.
+
+\subsection{Energy and label budget}\label{sec:energy}
+With the constant-power model $E=P\cdot t$ from \cite{montoya2025}, hit probability $h$, lookup time $t_c$, cloud time $t_i$ and audit rate $\varepsilon$, the expected energy per query and the saving against cloud-only are
+\begin{align}
+E&=P\big[t_c+(1-h+\varepsilon h)\,t_i\big],\qquad E_{\text{cloud}}=P\,t_i,\nonumber\\
+S&=1-E/E_{\text{cloud}}=h-\big(t_c/t_i+\varepsilon h\big).\label{eq:energy}
+\end{align}
+Caching saves energy if and only if $h>(t_c/t_i)/(1-\varepsilon)$. With the measured values 0.25\,s and 4.77\,s from \cite{montoya2025} and $\varepsilon=0.02$, the break-even hit rate is about 5.3\pct{}. The last term in~\eqref{eq:energy} is the price of calibration: with $\varepsilon=0.02$ it costs about two per cent of the hit rate in saving. Safety is paid for by this term and by the hits that the risk rule declines to serve. Labels arrive from misses at rate $(1-h)\Lambda$ and from audits at rate $\varepsilon h\Lambda$ for a query rate $\Lambda$; at $h=0.46$, $\varepsilon=0.02$, misses supply at most about 98\pct{} of all labels (only misses that have a candidate above the similarity floor are labelled, and these labels fall mostly in the lower-similarity bins), so the audit rate should be lowered only once the high-similarity bins hold enough labels. Eq.~\eqref{eq:energy} also depends on the lookup cost: at $h=0.456$ (the RAASC $+$ inv hit rate of Table~\ref{tab:main}), $\varepsilon=0.02$ and a cloud time of 4.77\,s the saving is 39\pct{} for a lookup time of 0.25\,s, 34\pct{} for 0.5\,s and 24\pct{} for 1\,s, and it vanishes only at about 2.1\,s. Under the constant-power model the energy saving equals the latency saving apart from the audit term, so the energy column of Table~\ref{tab:main} is not independent evidence.
+
+\section{Experimental Setup}\label{sec:setup}
+\textbf{Implementation.} The prototype \texttt{raasc\_sim.py} (Python, NumPy only, one file) implements the gateway logic and a seeded workload generator. It runs three policies on identical traffic: cloud-only, a class-aware TTL cache, and RAASC, including lookup, admission, eviction, invalidation, shadow audit and degraded mode. It reports hit, flagged, unanswered, stale, wrong-intent, unsafe, risk-weighted harm, latency, energy and decision time. The command \texttt{python raasc\_sim.py --seeds 20 --out results.json} reproduces the simulated numbers of Sections~\ref{sec:consistency}--\ref{sec:denylist}. The risk-scoring step took 65\,\textmu s per query in the Python prototype (26\,\textmu s for the TTL check), which is under 0.03\pct{} of the measured 0.25\,s lookup time \cite{montoya2025}. Further configurations add the baselines and replacement policies of Section~\ref{sec:baselines} and the three update-process variants of Section~\ref{sec:shift}, and the script reports paired differences over seeds (Table~\ref{tab:paired}).
+
+\textbf{Workload.} The evaluation is trace-free: traffic is produced by a seeded generator and no recorded clinical queries are used. One simulated week contains 400 intents in 40 topics, represented by 64-dimensional synthetic embeddings, with Zipf popularity ($s=1.1$) and a class mix of 60 / 25 / 15\pct{} (static / semi-static / volatile). Paraphrases have a mean cosine of 0.895 and same-topic questions 0.61, chosen to match the values reported in \cite{montoya2025}. Updates are Poisson with mean intervals of 30\,d, 1\,d and 5\,min. Queries arrive at 2 per minute (about 20,000 per seed) and the cache holds 100 entries. Lookup time (0.25\,s), cloud time (4.77\,s) and power (3.15\,W) are the measurements of \cite{montoya2025}. Severity weights are 1, 2 and 5; the similarity floor is 0.50; $\varepsilon=0.02$; $L_{\min}=30\,$s; $\alpha_0=2$; $n_0=8$; push coverage is 0.5 for static and semi-static intents and 0 for volatile ones; degraded mode accepts risks up to $4\rho$ and requests time out after 2\,s. The calibration prior is Eq.~\eqref{eq:prior} (Table~\ref{tab:prior}). Severity weights, intervals and push coverage are assumptions that clinical governance would replace.
+
+\textbf{Estimator stress workloads.} For the test of Section~\ref{sec:shift} only the update process of the generator is changed, and all policies see the same updates within a variant: (i) mis-specified priors, in which 30\pct{} of the intents change 10 times faster and 30\pct{} 10 times more slowly than the class prior; (ii) a sudden change, in which all update rates are multiplied by 10 at the middle of the week; and (iii) a drift, in which all rates grow linearly from 1 to 10 times the prior over the week. Queries, embeddings and all other parameters are as above.
+
+\textbf{Extended simulator.} Tables~\ref{tab:main}--\ref{tab:coverage} were produced with the first version of the simulator. The analyses of Sections~\ref{sec:consistency}--\ref{sec:denylist} (Tables~\ref{tab:consistency}--\ref{tab:deny}) were produced with an extended version, released with this paper, that adds the following: both harm conventions; the explicit prior of Eq.~\eqref{eq:prior}; per-bin bookkeeping of miss and audit labels together with an oracle label for the best-scoring candidate of every query; an audit of flagged answers; and a deny-category workload with router recall below one. Its generator differs from the first version in two details that the paper does not fix: the per-query similarity to the intent centre is Beta-distributed (the cosine between two paraphrases has mean 0.894 and standard deviation 0.14; same-topic questions have mean 0.607), and an intent that is fetched again refreshes its existing entry instead of adding a second one. Absolute levels therefore differ from Tables~\ref{tab:main}--\ref{tab:coverage} (for example, the hit rate of RAASC $+$ inv is 50.6\pct{} there, and the TTL cache reaches a higher hit rate than RAASC), and every extended table carries its own reference rows; only comparisons within one table are meaningful.
+
+\textbf{Deny-category workload.} For Section~\ref{sec:denylist}, 40 of the 400 intents (10\pct{}, drawn uniformly irrespective of class; about 10\pct{} of the queries) form a deny category. Their harm is weighted with a severity of 10, which is an assumption standing in for the clinical governance decision, and the router detects each query of such an intent independently with probability $r$ (its recall).
+
+\textbf{Fairness and statistics.} All policies see the same stream of queries, update events and link states for each seed (a paired design). We use 20 independent seeds and report the mean with a 95\pct{} interval computed as 1.96 times the standard deviation divided by $\sqrt{20}$. This is a normal approximation; the Student-$t$ quantile for 19 degrees of freedom (2.093) would widen every interval by about 7\pct{}, which leaves the unsafe-rate and harm intervals of the class-aware TTL cache and of RAASC disjoint. Because the policies share each seed's traffic, a paired analysis of per-seed differences is the appropriate test. In addition, Section~\ref{sec:paired} reports the mean of the per-seed differences with a 95\pct{} Student-$t$ interval, the standardised effect size $d_z$ (the mean difference divided by its standard deviation), a two-sided paired $t$-test and the number of seeds in which one policy is better; the text notes which differences survive Holm's correction for the 16 tests of Table~\ref{tab:paired}. With 20 pairs the $t$-test has 80\pct{} power for $d_z=0.66$ at the 5\pct{} level. The risk budget $\rho=0.05$ was fixed in advance; other values are shown in Section~\ref{sec:budget}.
+
+\textbf{Policies compared.} Cloud-only sends every query to the cloud. The class-aware TTL cache keeps static, semi-static and volatile answers for 7 days, 6 hours and 0\,s respectively (volatile answers are never cached) and uses a global cosine threshold of 0.80. TTL $+$ inv adds event-driven invalidation with a push coverage of 0.5, a stronger baseline because RAASC also uses invalidation. RAASC is the proposed rule without invalidation (push coverage zero in Eqs.~\eqref{eq:stale}, \eqref{eq:admit} and \eqref{eq:amax}); RAASC $+$ inv is the same rule with a push coverage of 0.5 for static and semi-static intents and zero for volatile ones. The TTL values and the threshold of 0.80 are assumed values; a threshold sweep is not included (Section~\ref{sec:threats}). Section~\ref{sec:baselines} adds four baselines: a fixed-threshold semantic cache without TTL ($\tau=0.80$), with and without invalidation, and a TTL cache whose class limits equal the reuse limits of Section~\ref{sec:reuse} (1.5\,d, 36\,min and 0\,s without invalidation; 3.1\,d, 73\,min and 0\,s with invalidation; the volatile limit is below $L_{\min}$, so volatile answers are never cached), both with the global threshold 0.80. RAASC $+$ inv is also run with plain LRU, LFU and ARC \cite{megiddo2003} replacement instead of the default rule of Section~\ref{sec:admission} (risk-expired entries first, then LRU).
+
+\textbf{Metrics.} Hit is the share of queries answered from the cache without a flag. Unsafe is the share of cache-served answers that are stale or belong to a different intent. Harm is the severity-weighted unsafe count per 1,000 queries, using the severity of the true intent; Eq.~\eqref{eq:cost} and Proposition~\ref{prop:bound} use the severity of the served entry's class instead, and the two conventions differ only when a wrong-intent hit crosses classes. The extended tables report both (``harm'' and ``harm$_{\text{s}}$''). The two safety metrics therefore have different denominators; Section~\ref{sec:main} also gives approximate absolute counts. Latency is the mean over answered queries. Energy is the mean over all queries under $E=P\,t$, including audits and timeouts of failed requests. Unanswered and flagged shares are reported for the outage test.
+
+\textbf{Data statement.} All inputs are synthetic. No patient data, clinical records or human subjects were used. Severity weights, update intervals and push coverage are assumptions that clinical governance would replace. The first version of the reference simulator regenerates the simulated results of Sections~\ref{sec:main} to~\ref{sec:shift}; the extended version released with this paper regenerates Sections~\ref{sec:consistency} to~\ref{sec:denylist}; the values of Section~\ref{sec:sens} follow from Eq.~\eqref{eq:amax}, and Table~\ref{tab:coverage} of Section~\ref{sec:coverage} is generated by the separate script \texttt{raasc\_estimator\_coverage.py} (seed 0).
+
+\section{Experimental Results}\label{sec:results}
+\subsection{Main comparison}\label{sec:main}
+Table~\ref{tab:main} compares the five policies at the defaults. Compared with the class-aware TTL baseline, RAASC (without invalidation) lowers unsafe cached answers from 3.14\pct{} to 0.28\pct{} (91\pct{} fewer) and risk-weighted harm by 89\pct{}. The per-policy intervals of these two safety metrics do not overlap, and the paired tests of Section~\ref{sec:paired} confirm both reductions (Table~\ref{tab:paired}). Compared with the stronger TTL $+$ inv baseline, RAASC $+$ inv reduces unsafe answers by 74\pct{} (0.86\pct{} to 0.22\pct{}) and harm by 71\pct{} (12.2 to 3.5). With about 20,000 queries per seed, these rates correspond to roughly 270, 73, 25 and 20 unsafe cached answers per seed for TTL, TTL $+$ inv, RAASC and RAASC $+$ inv (unsafe rate $\times$ hit rate $\times$ queries). The per-policy intervals of hit rate and energy overlap between TTL and RAASC; the paired analysis of Section~\ref{sec:paired} resolves a small hit-rate gain ($+1.7$ points, $p=0.002$) but finds no significant energy difference (0.11\,J, $p=0.11$), so the two should be read as comparable in energy. RAASC $+$ inv uses 39.4\pct{} less energy per query than cloud-only (TTL: 37.5\pct{}). Of its 0.22\pct{} unsafe answers, 0.15\pct{} are stale and 0.08\pct{} are wrong-intent hits (the two overlap slightly). All figures hold for the synthetic workload of Section~\ref{sec:setup} only.
+
+\begin{table*}[!t]
+\caption{Policy comparison at 0\pct{} outage (100 entries; mean $\pm$ 95\pct{} CI over 20 seeds; unsafe: \pct{} of cache-served answers; harm: severity-weighted unsafe answers per 1,000 queries)}
+\label{tab:main}
+\centering\small
+\begin{tabular}{lccccc}
+\toprule
+Policy & Hit \% & Unsafe \% & Harm/1k & Lat. (s) & Energy (J)\\
+\midrule
+Cloud-only & n/a & n/a & n/a & 4.77 $\pm$ 0.01 & 15.02 $\pm$ 0.02\\
+Class TTL & 42.7 $\pm$ 3.3 & 3.14 $\pm$ 1.45 & 39.5 $\pm$ 15.6 & 2.98 $\pm$ 0.16 & 9.39 $\pm$ 0.49\\
+TTL $+$ inv & 42.6 $\pm$ 3.2 & 0.86 $\pm$ 0.39 & 12.2 $\pm$ 4.6 & 2.99 $\pm$ 0.15 & 9.41 $\pm$ 0.48\\
+\textbf{RAASC} & \textbf{44.4 $\pm$ 3.8} & \textbf{0.28 $\pm$ 0.05} & \textbf{4.2 $\pm$ 0.7} & \textbf{2.90 $\pm$ 0.18} & \textbf{9.28 $\pm$ 0.56}\\
+\textbf{RAASC $+$ inv} & \textbf{45.6 $\pm$ 3.8} & \textbf{0.22 $\pm$ 0.07} & \textbf{3.5 $\pm$ 0.9} & \textbf{2.84 $\pm$ 0.18} & \textbf{9.10 $\pm$ 0.56}\\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection{Risk budget}\label{sec:budget}
+The budget is the main operating knob of RAASC. Fig.~\ref{fig:budget} shows the five values that were run (no others were tried). At budgets 0.05 and 0.10, RAASC has more hits and lower harm than both baselines. At 0.20 it still beats the plain TTL baseline on hits (54.2\pct{} vs 42.7\pct{}), harm (25.1 vs 39.5) and energy (7.84\,J, 48\pct{} below cloud-only, vs 9.39\,J), but not TTL $+$ inv on harm (12.2). At 0.40, harm (61.6) is higher than both baselines. At 0.02, harm is almost zero (1.0), but the hit rate (38.8\pct{}) and the energy (10.10\,J) are worse than the baseline. The energy benefit therefore must not drive the choice of the budget; it is a governance decision (Section~\ref{sec:discussion}).
+
+\begin{figure}[!t]
+\centering
+\origfig{9}{52.5pt}{435.5pt}{316pt}{186pt}
+\caption{Hit rate against risk-weighted harm for five risk budgets (RAASC $+$ inv, push coverage 0.5) and for the two TTL baselines. One simulated week, mean of 20 seeds. Lower harm and higher hit rate are better.}
+\label{fig:budget}
+\end{figure}
+
+\subsection{Ablation}\label{sec:ablation}
+Table~\ref{tab:ablation} removes one learner at a time from RAASC $+$ inv. The calibrator lets RAASC use similarity below the fixed threshold when the measured wrong-intent rate in that bin is low. Without it (fixed threshold 0.80), the hit rate drops by 5.8 points and energy rises by 0.85\,J, for a small further gain in safety (harm 2.2 instead of 3.5, with overlapping intervals; the paired difference of 1.3 is consistent across seeds, $p=0.013$, but not significant after Holm's correction); the calibrator thus trades a little safety margin for availability. The adaptive rate estimator shows no measurable effect in this experiment (harm 0.25 lower with it, paired $p=0.63$). This is expected from Proposition~\ref{prop:bias}: the generated update rates equal the class priors, so the bias term is zero and the estimator has nothing to correct. Section~\ref{sec:shift} tests it with wrongly specified priors and changing update rates.
+
+\begin{table}[!t]
+\caption{Ablation (0\pct{} outage; mean $\pm$ 95\pct{} CI over 20 seeds)}
+\label{tab:ablation}
+\centering\scriptsize
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{p{1.2in}cccc}
+\toprule
+Variant & Hit \% & Unsafe \% & Harm & Energy (J)\\
+\midrule
+Full RAASC $+$ inv & 45.6 $\pm$ 3.8 & 0.22 $\pm$ 0.07 & 3.5 $\pm$ 0.9 & 9.10 $\pm$ 0.56\\
+No calibration (threshold 0.80) & 39.8 $\pm$ 3.0 & 0.14 $\pm$ 0.05 & 2.2 $\pm$ 0.6 & 9.95 $\pm$ 0.44\\
+No adaptive rate (class prior only) & 45.6 $\pm$ 3.8 & 0.26 $\pm$ 0.14 & 3.8 $\pm$ 1.4 & 9.10 $\pm$ 0.56\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Link outage}\label{sec:outage}
+Table~\ref{tab:outage} fails each cloud request independently with probability 0.10. A cache alone removes 43\pct{} of the failures of a cloud-only assistant (10.11\pct{} to 5.75\pct{}). RAASC with the degraded mode removes 54\pct{} of the failures relative to cloud-only, and a further 19\pct{} relative to the TTL cache. The additional 0.87\pct{} of queries that are answered in degraded mode carry an explicit outdated-information warning and are reported separately from the unsafe answers. Most of the gain over the TTL cache comes from the degraded mode (5.52\pct{} without it against 5.75\pct{} for TTL), which the TTL cache was not given; the share of flagged answers that were actually outdated or wrong is audited in Section~\ref{sec:degaudit}.
+
+\begin{table}[!t]
+\caption{Availability at 10\pct{} cloud-link outage (mean $\pm$ 95\pct{} CI over 20 seeds)}
+\label{tab:outage}
+\centering\scriptsize
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{p{0.8in}cccc}
+\toprule
+Policy & Unans. \% & Flagged \% & Unsafe \% & Energy (J)\\
+\midrule
+Cloud-only & 10.11 $\pm$ 0.09 & 0 & n/a & 14.14 $\pm$ 0.02\\
+Class-aware TTL & 5.75 $\pm$ 0.34 & 0 & 3.34 $\pm$ 1.48 & 8.89 $\pm$ 0.46\\
+RAASC$+$inv, no degraded mode & 5.52 $\pm$ 0.39 & 0 & 0.17 $\pm$ 0.03 & 8.70 $\pm$ 0.52\\
+RAASC$+$inv, degraded mode & 4.65 $\pm$ 0.37 & 0.87 $\pm$ 0.08 & 0.17 $\pm$ 0.03 & 8.64 $\pm$ 0.52\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Paired comparison}\label{sec:paired}
+Because the policies share each seed's traffic, Table~\ref{tab:paired} analyses the per-seed differences between the first and the second policy of each pair. For every metric it gives the mean difference $\Delta$ with its 95\pct{} Student-$t$ interval, the standardised effect size $d_z$ ($\Delta$ divided by the standard deviation of the differences), the $p$-value of a two-sided paired $t$-test and the number of seeds in which the first policy is better. RAASC lowers the unsafe share of the TTL cache by 2.86 points and harm by 35.2 per 1,000 queries, in all 20 seeds ($p<0.001$); with invalidation the reductions are 0.64 points and 8.7, in 19 of 20 seeds. The paired test also resolves the hit rates that overlap in Table~\ref{tab:main}: RAASC gains 1.7 points over TTL and 3.0 points over TTL $+$ inv, whereas its energy saving is significant only against TTL $+$ inv (0.31\,J, $p<0.001$) and not against TTL (0.11\,J, $p=0.11$). Against the TTL cache with the limits of Section~\ref{sec:reuse} (Section~\ref{sec:baselines}), the safety differences are not significant, whereas the hit-rate ($+4.7$ points) and energy ($-0.56$\,J) differences are. With 20 seeds the $t$-test has 80\pct{} power for $d_z=0.66$, so smaller effects, such as the safety differences to the V-D TTL ($d_z=-0.39$ and $-0.31$), are neither confirmed nor excluded. After Holm's correction for the 16 tests of Table~\ref{tab:paired}, the only differences that are no longer significant at the 5\pct{} level are these two, the energy difference to TTL and the two safety differences of the calibration ablation.
+
+\begin{table}[!t]
+\caption{Paired differences over 20 seeds (first minus second policy; wins: seeds in which the first policy is better)}
+\label{tab:paired}
+\centering\scriptsize
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{lcccc}
+\toprule
+Metric & $\Delta$ [95\pct{} CI] & $d_z$ & $p$ & Wins\\
+\midrule
+\multicolumn{5}{l}{\emph{RAASC vs class TTL}}\\
+Hit (pts) & $+1.68$ [$+0.70$, $+2.66$] & 0.80 & 0.002 & 13/20\\
+Unsafe (pts) & $-2.86$ [$-4.38$, $-1.33$] & $-0.88$ & $<$0.001 & 20/20\\
+Harm /1k & $-35.2$ [$-51.6$, $-18.9$] & $-1.01$ & $<$0.001 & 20/20\\
+Energy (J) & $-0.11$ [$-0.26$, $+0.03$] & $-0.37$ & 0.11 & 13/20\\
+\multicolumn{5}{l}{\emph{RAASC $+$ inv vs TTL $+$ inv}}\\
+Hit (pts) & $+3.02$ [$+2.05$, $+3.99$] & 1.46 & $<$0.001 & 19/20\\
+Unsafe (pts) & $-0.64$ [$-0.99$, $-0.28$] & $-0.84$ & 0.001 & 19/20\\
+Harm /1k & $-8.7$ [$-12.9$, $-4.5$] & $-0.98$ & $<$0.001 & 19/20\\
+Energy (J) & $-0.31$ [$-0.45$, $-0.17$] & $-1.05$ & $<$0.001 & 16/20\\
+\multicolumn{5}{l}{\emph{RAASC $+$ inv vs TTL (V-D limits) $+$ inv}}\\
+Hit (pts) & $+4.66$ [$+3.69$, $+5.64$] & 2.23 & $<$0.001 & 20/20\\
+Unsafe (pts) & $-0.22$ [$-0.48$, $+0.04$] & $-0.39$ & 0.10 & 12/20\\
+Harm /1k & $-1.8$ [$-4.5$, $+0.9$] & $-0.31$ & 0.18 & 11/20\\
+Energy (J) & $-0.56$ [$-0.70$, $-0.42$] & $-1.88$ & $<$0.001 & 20/20\\
+\multicolumn{5}{l}{\emph{RAASC $+$ inv vs no calibration}}\\
+Hit (pts) & $+5.84$ [$+4.83$, $+6.85$] & 2.71 & $<$0.001 & 20/20\\
+Unsafe (pts) & $+0.08$ [0.00, $+0.16$] & 0.44 & 0.06 & 6/20\\
+Harm /1k & $+1.3$ [$+0.3$, $+2.3$] & 0.61 & 0.01 & 4/20\\
+Energy (J) & $-0.86$ [$-1.01$, $-0.71$] & $-2.70$ & $<$0.001 & 20/20\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Additional baselines and replacement policies}\label{sec:baselines}
+Table~\ref{tab:baselines} adds four baselines and three replacement rules. The fixed-threshold semantic cache without TTL reaches a hit rate of about 52\pct{} but serves 16.5\pct{} unsafe answers (12.5\pct{} with invalidation; harm 623 and 558), because nothing retires volatile or ageing answers; relative to it, RAASC $+$ inv gives up 6.2 points of hit rate (paired $p=0.003$) and 1.07\,J of energy for 12.2 points fewer unsafe answers. The TTL cache whose class limits equal those of Section~\ref{sec:reuse} is the strongest baseline: its unsafe share (0.80\pct{}, and 0.44\pct{} with invalidation) and harm (8.9 and 5.3) are close to those of RAASC. The paired differences to RAASC $+$ inv are not significant in safety (Table~\ref{tab:paired}), but RAASC $+$ inv has 4.7 points more hits, in all 20 seeds, and uses 0.56\,J less energy per query. Most of the safety gain over the class-aware TTL cache therefore comes from the intent-class reuse limits of Eq.~\eqref{eq:amax}, and the calibrated similarity test supplies the additional hits, which agrees with Table~\ref{tab:ablation}. Among the replacement rules, plain LRU, without a preference for risk-expired entries, loses 1.0 point of hit rate (in all 20 seeds) and costs 0.15\,J more per query, with unchanged safety; LFU loses 13.9 points of hit rate; and ARC \cite{megiddo2003} is indistinguishable from the default rule (hit-rate difference 0.05 points, $p=0.78$), so the simple rule suffices for this workload.
+
+\subsection{Update-rate estimator under shifted rates}\label{sec:shift}
+Table~\ref{tab:shift} repeats the comparison of Table~\ref{tab:ablation} on the three workload variants of Section~\ref{sec:setup}, in which the class prior is wrong or the update process changes; TTL $+$ inv is shown for reference. With mis-specified priors, the adaptive estimator lowers the unsafe share from 0.58\pct{} to 0.37\pct{} and harm from 7.4 to 5.0 (paired difference $-2.3$, 95\pct{} CI [$-4.0$, $-0.6$], $p=0.010$, lower in 16 of 20 seeds) at an unchanged hit rate. After a sudden change and under drift it lowers harm by about one third (14.2 to 9.7 and 14.4 to 9.5; $p<0.001$ in both) at a cost of about one point of hit rate ($-0.9$ and $-1.2$ points) and 0.13--0.17\,J of energy. In all three variants RAASC stays far below TTL $+$ inv in harm (5.0--9.7 against 29.4--66.3), but the estimator does not restore the level of the matched workload (3.5), which is consistent with the running counts of Eq.~\eqref{eq:rate} absorbing a rate change only gradually. The estimator is therefore useful when the class prior is wrong or outdated, and unnecessary when it is right (Table~\ref{tab:ablation}).
+
+\subsection{Analytical sensitivity of the reuse limit}\label{sec:sens}
+The experiments vary only the budget, but Eq.~\eqref{eq:amax} gives the reuse limit in closed form, so its sensitivity can be stated without further simulation. Table~\ref{tab:limits} lists the limit at $p_{\text{wrong}}=0$ for the five budgets of Fig.~\ref{fig:budget} and the class parameters of Section~\ref{sec:setup}. For small budgets the limit grows almost linearly with $\rho/\sigma_c$, and invalidation with $\kappa=0.5$ doubles it. The volatile limit stays below $L_{\min}=30\,$s at all five budgets (25\,s at $\rho=0.40$), so volatile answers are never admitted at any budget that was run. The limits also show where RAASC becomes more permissive than the TTL baseline of Section~\ref{sec:setup} (7\,d and 6\,h): with invalidation, the static limit exceeds 7\,d for $\rho$ above about 0.11 and the semi-static limit exceeds 6\,h for $\rho$ above about 0.235. This is consistent with Section~\ref{sec:budget}, where the harm at $\rho=0.40$ exceeds that of both baselines, although wrong-intent hits also contribute and were not separated there. Table~\ref{tab:wrongeffect} shows how the calibrated wrong-intent probability uses up the budget. Because the two risks add in Eq.~\eqref{eq:unsafe}, a bin with a small $p_{\text{wrong}}$ shortens the admissible age by its share of the budget $\rho/\sigma_c$: at $\rho=0.05$, $p_{\text{wrong}}=0.01$ already removes 20\pct{} of the static limit and 40\pct{} of the semi-static limit, and a semi-static entry is not served at all once $p_{\text{wrong}}\ge\rho/\sigma_c=0.025$. Accurate estimates in the high-similarity bins, where $p_{\text{wrong}}$ is small and entries are actually served, therefore matter most, yet these bins tend to receive fewer miss labels (Section~\ref{sec:energy}). This motivates the validation of $p_{\text{wrong}}$ on real embeddings in Section~\ref{sec:protocol}.
+
+\begin{table}[!t]
+\caption{Further baselines and replacement policies (0\pct{} outage; mean $\pm$ 95\pct{} CI over 20 seeds)}
+\label{tab:baselines}
+\centering\scriptsize
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{lcccc}
+\toprule
+Policy & Hit \% & Unsafe \% & Harm/1k & Energy (J)\\
+\midrule
+Class TTL & 42.7 $\pm$ 3.3 & 3.14 $\pm$ 1.45 & 39.5 $\pm$ 15.6 & 9.39 $\pm$ 0.49\\
+Class TTL $+$ inv & 42.6 $\pm$ 3.2 & 0.86 $\pm$ 0.39 & 12.2 $\pm$ 4.5 & 9.41 $\pm$ 0.48\\
+Fixed-$\tau$ semantic & 52.0 $\pm$ 0.7 & 16.48 $\pm$ 3.38 & 622.8 $\pm$ 157.0 & 7.99 $\pm$ 0.11\\
+Fixed-$\tau$ semantic $+$ inv & 51.8 $\pm$ 0.8 & 12.47 $\pm$ 3.10 & 558.2 $\pm$ 159.6 & 8.03 $\pm$ 0.12\\
+TTL (V-D limits) & 39.6 $\pm$ 3.0 & 0.80 $\pm$ 0.35 & 8.9 $\pm$ 3.5 & 9.86 $\pm$ 0.44\\
+TTL (V-D limits) $+$ inv & 40.9 $\pm$ 3.1 & 0.44 $\pm$ 0.30 & 5.3 $\pm$ 3.0 & 9.66 $\pm$ 0.47\\
+RAASC $+$ inv (default) & 45.6 $\pm$ 3.8 & 0.22 $\pm$ 0.07 & 3.5 $\pm$ 0.9 & 9.10 $\pm$ 0.56\\
+RAASC $+$ inv, LRU & 44.6 $\pm$ 3.8 & 0.21 $\pm$ 0.09 & 3.4 $\pm$ 1.1 & 9.24 $\pm$ 0.55\\
+RAASC $+$ inv, LFU & 31.7 $\pm$ 2.8 & 0.23 $\pm$ 0.26 & 2.4 $\pm$ 2.6 & 11.14 $\pm$ 0.41\\
+RAASC $+$ inv, ARC & 45.6 $\pm$ 3.8 & 0.19 $\pm$ 0.05 & 3.3 $\pm$ 1.0 & 9.11 $\pm$ 0.56\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[!t]
+\caption{Update-rate estimator under shifted update rates (RAASC $+$ inv; 0\pct{} outage; mean $\pm$ 95\pct{} CI over 20 seeds)}
+\label{tab:shift}
+\centering\scriptsize
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{llcccc}
+\toprule
+Workload & Rate est. & Hit \% & Unsafe \% & Harm/1k & Energy (J)\\
+\midrule
+\multirow{3}{*}{Matched} & Adaptive & 45.6 $\pm$ 3.8 & 0.22 $\pm$ 0.07 & 3.5 $\pm$ 0.9 & 9.10 $\pm$ 0.56\\
+ & Class prior & 45.6 $\pm$ 3.8 & 0.26 $\pm$ 0.14 & 3.8 $\pm$ 1.4 & 9.10 $\pm$ 0.56\\
+ & TTL $+$ inv & 42.6 $\pm$ 3.2 & 0.86 $\pm$ 0.39 & 12.2 $\pm$ 4.5 & 9.41 $\pm$ 0.48\\
+\midrule
+\multirow{3}{*}{Wrong prior} & Adaptive & 45.2 $\pm$ 3.5 & 0.37 $\pm$ 0.09 & 5.0 $\pm$ 1.3 & 9.16 $\pm$ 0.51\\
+ & Class prior & 45.3 $\pm$ 3.6 & 0.58 $\pm$ 0.16 & 7.4 $\pm$ 1.7 & 9.15 $\pm$ 0.53\\
+ & TTL $+$ inv & 42.3 $\pm$ 3.0 & 2.16 $\pm$ 0.94 & 29.4 $\pm$ 9.8 & 9.47 $\pm$ 0.45\\
+\midrule
+\multirow{3}{*}{Sudden} & Adaptive & 44.6 $\pm$ 3.7 & 0.77 $\pm$ 0.21 & 9.7 $\pm$ 2.6 & 9.24 $\pm$ 0.54\\
+ & Class prior & 45.5 $\pm$ 3.7 & 1.08 $\pm$ 0.28 & 14.2 $\pm$ 3.1 & 9.10 $\pm$ 0.54\\
+ & TTL $+$ inv & 42.1 $\pm$ 2.9 & 3.91 $\pm$ 0.98 & 54.3 $\pm$ 11.9 & 9.49 $\pm$ 0.43\\
+\midrule
+\multirow{3}{*}{Drift} & Adaptive & 44.3 $\pm$ 3.7 & 0.79 $\pm$ 0.18 & 9.5 $\pm$ 2.2 & 9.29 $\pm$ 0.55\\
+ & Class prior & 45.5 $\pm$ 3.6 & 1.10 $\pm$ 0.28 & 14.4 $\pm$ 3.3 & 9.12 $\pm$ 0.54\\
+ & TTL $+$ inv & 42.3 $\pm$ 3.0 & 4.67 $\pm$ 1.45 & 66.3 $\pm$ 18.5 & 9.47 $\pm$ 0.45\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[!t]
+\caption{Reuse limit (Eq.~\eqref{eq:amax}) at $p_{\text{wrong}}=0$ for the budgets of Fig.~\ref{fig:budget}; push coverage 0.5 for static and semi-static intents (no invalidation in parentheses)}
+\label{tab:limits}
+\centering\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{cccc}
+\toprule
+$\rho$ & Static & Semi-static & Volatile\\
+\midrule
+0.02 & 29.1\,h (14.5\,h) & 29\,min (14\,min) & 1.2\,s\\
+0.05 & 3.1\,d (1.5\,d) & 73\,min (36\,min) & 3.0\,s\\
+0.10 & 6.3\,d (3.2\,d) & 2.5\,h (74\,min) & 6.1\,s\\
+0.20 & 13.4\,d (6.7\,d) & 5.1\,h (2.5\,h) & 12.2\,s\\
+0.40 & 30.6\,d (15.3\,d) & 10.7\,h (5.4\,h) & 25.0\,s\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[!t]
+\caption{Effect of the wrong-intent estimate on the reuse limit (budget 0.05, push coverage 0.5; share of the limit at $p_{\text{wrong}}=0$ in parentheses)}
+\label{tab:wrongeffect}
+\centering\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{ccc}
+\toprule
+$p_{\text{wrong}}$ & Static & Semi-static\\
+\midrule
+0 & 3.1\,d (100\pct{}) & 73\,min (100\pct{})\\
+0.005 & 2.8\,d (90\pct{}) & 58\,min (80\pct{})\\
+0.01 & 2.5\,d (80\pct{}) & 44\,min (60\pct{})\\
+0.02 & 1.9\,d (61\pct{}) & 15\,min (20\pct{})\\
+0.03 & 30.0\,h (41\pct{}) & not served\\
+0.04 & 15.1\,h (20\pct{}) & not served\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Coverage of the wrong-intent estimators}\label{sec:coverage}
+The cache-level experiments use the estimator~\eqref{eq:wrong}, and Proposition~\ref{prop:bound} needs the estimates to be conservative (A4). To test the estimator in isolation, we draw $w\sim\mathrm{Binomial}(n,q)$ labels for one similarity bin with true wrong-intent probability $q$ and compare three upper estimates of $q$:~\eqref{eq:wrong} with a well-specified prior ($p_0=q$) and with an optimistic prior ($p_0=q/4$), the Hoeffding bound with $\delta=0.05$, and the exact one-sided binomial bound of Clopper and Pearson \cite{clopper1934} with $\delta=0.05$. Table~\ref{tab:coverage} gives the coverage, $\Pr[\text{estimate}\ge q]$, and the mean estimate over 200,000 draws per setting. Estimator~\eqref{eq:wrong} never reaches the 95\pct{} level: its coverage lies between 33\pct{} and 89\pct{} with the well-specified prior and between 33\pct{} and 81\pct{} with the optimistic prior, and the shortfall is largest for small $q$ and few labels, which is the situation of the high-similarity bins that decide which hits are served. The Hoeffding bound covers at least 99.6\pct{} in all settings, but its mean value is 1.1 to 6.9 times that of~\eqref{eq:wrong}. The exact bound lies in between, with coverage of 95.1--100\pct{}.
+
+A margin is paid for out of the budget share $\rho/\sigma_c$ (Table~\ref{tab:wrongeffect}). For the Hoeffding margin alone to fit inside the share, $n$ must exceed $\ln(1/\delta)/\big(2(\rho/\sigma_c)^2\big)$, that is 600, 2,397 and 14,979 labels for static, semi-static and volatile intents at $\rho=0.05$ and $\delta=0.05$, well above the 185 labels that suffice to estimate a bin within 0.1 (Section~\ref{sec:calibtheory}). The exact bound needs fewer labels and keeps its guarantee for independent labels, but it too shortens the reuse limits relative to~\eqref{eq:wrong}. These results leave the cache-level results of Sections~\ref{sec:main} to~\ref{sec:shift} unchanged, since those use~\eqref{eq:wrong} and report the realised unsafe rate. They show that (A4) is not guaranteed by~\eqref{eq:wrong}, which is why Proposition~\ref{prop:bound} is stated as conditional, and that a guaranteed calibrator is practical only where labels are plentiful. The draws are independent by construction, which real miss and audit labels are not; Section~\ref{sec:selection} therefore repeats the comparison on the labels that the cache itself produces, and running the exact bound inside the cache simulation remains the next experiment (Section~\ref{sec:protocol}).
+
+\begin{table*}[!t]
+\caption{Coverage (\pct{}) / mean estimate of four upper estimates of the wrong-intent probability $q$ of one bin ($n$ labels, 200,000 draws; 95\pct{} confidence level for the two bounds)}
+\label{tab:coverage}
+\centering\small
+\begin{tabular}{rrcccc}
+\toprule
+$q$ & $n$ & (6), $p_0=q$ & (6), $p_0=q/4$ & Hoeffding & Clopper--Pearson\\
+\midrule
+0.02 & 20 & 33 / 0.042 & 33 / 0.033 & 100 / 0.294 & 100 / 0.169\\
+0.02 & 60 & 70 / 0.035 & 70 / 0.032 & 100 / 0.178 & 100 / 0.080\\
+0.02 & 185 & 72 / 0.030 & 72 / 0.029 & 100 / 0.110 & 98 / 0.046\\
+0.02 & 600 & 85 / 0.026 & 76 / 0.025 & 100 / 0.070 & 96 / 0.032\\
+0.1 & 20 & 88 / 0.154 & 61 / 0.125 & 100 / 0.374 & 100 / 0.278\\
+0.1 & 60 & 86 / 0.135 & 73 / 0.125 & 100 / 0.258 & 99 / 0.187\\
+0.1 & 185 & 84 / 0.121 & 77 / 0.118 & 100 / 0.190 & 96 / 0.144\\
+0.1 & 600 & 81 / 0.112 & 81 / 0.111 & 100 / 0.150 & 96 / 0.122\\
+0.3 & 20 & 89 / 0.384 & 58 / 0.313 & 100 / 0.574 & 96 / 0.504\\
+0.3 & 60 & 84 / 0.355 & 66 / 0.327 & 100 / 0.458 & 97 / 0.411\\
+0.3 & 185 & 83 / 0.333 & 74 / 0.323 & 100 / 0.390 & 96 / 0.360\\
+0.3 & 600 & 85 / 0.319 & 80 / 0.316 & 100 / 0.350 & 95 / 0.332\\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection{Realised cost versus budget, and the two harm conventions}\label{sec:consistency}
+Eq.~\eqref{eq:cost} and Proposition~\ref{prop:bound} weight an unsafe answer by the severity of the class of the \emph{served entry}, $\sigma_{c(i_j)}$, whereas the harm metric of Tables~\ref{tab:main}--\ref{tab:shift} weights it by the severity of the class of the \emph{true intent} of the query, $\sigma_{c(I_k)}$. The two differ by $\sum_k(\sigma_{c(I_k)}-\sigma_{c(i_j)})U_j$, and a term can be non-zero only when the classes differ, which implies $i_j\neq I_k$: the conventions coincide for stale hits and diverge only through wrong-intent hits that cross classes. To check that the budget controls the quantity that Proposition~\ref{prop:bound} bounds, the extended simulator records the estimated risk $R_j$ and the realised cost $\sigma_{c(i_j)}U_j$ of every served answer. Table~\ref{tab:consistency} reports both harm conventions, the realised mean cost per served answer, and the mean estimated risk of the served answers, for the five budgets.
+
+Three observations follow. First, the realised mean cost per served answer is below the budget $\rho$ at every budget and in all 20 seeds, and it is 63--89\pct{} of the mean estimated risk, so the estimates are conservative on average over the served answers, as (A4) requires, although this average does not verify the conditional statement for each decision. Second, the realised cost is far from the budget (about 18\pct{} of $\rho$ at $\rho=0.05$ and 14\pct{} at $\rho=0.40$), because most served entries sit well inside the budget and only few lie near the threshold; the bound $\rho/(1-\rho/2)$ is therefore loose. Third, the two harm conventions agree at small budgets (2.07 against 1.91 at $\rho=0.02$) and diverge as the budget grows (76.1 against 31.5 at $\rho=0.40$), because wrong-intent hits become more frequent (0.03\pct{} of the served answers at $\rho=0.02$, 0.17\pct{} at 0.05 and 3.2\pct{} at 0.40): a volatile question that is answered with a static entry costs $\sigma=5$ in the true-intent convention and $\sigma=1$ in the served-class convention. The true-intent convention is the more demanding one, and both should be reported when the budget is chosen. At the default budget, 74\pct{} of the served answers belong to static and 26\pct{} to semi-static entries (volatile answers are never admitted), with unsafe rates of 0.42\pct{} and 1.01\pct{}.
+
+\begin{table*}[!t]
+\caption{Realised cost versus budget in the extended simulator (RAASC $+$ inv; mean $\pm$ 95\pct{} CI over 20 seeds). Harm uses the severity of the true intent, harm$_{\text{s}}$ that of the served entry's class (both per 1,000 queries); cost is the mean $\sigma_{c(i_j)}U_j$ per served answer and $\bar R$ the mean estimated risk of the served answers}
+\label{tab:consistency}
+\centering\small
+\begin{tabular}{ccccccc}
+\toprule
+$\rho$ & Hit \% & Harm & Harm$_{\text{s}}$ & Realised cost & $\bar R$ & $\rho/(1-\rho/2)$\\
+\midrule
+0.02 & 46.85 $\pm$ 3.40 & 2.07 $\pm$ 0.38 & 1.91 $\pm$ 0.34 & 0.0042 $\pm$ 0.0008 & 0.0067 & 0.0202\\
+0.05 & 50.64 $\pm$ 3.37 & 6.21 $\pm$ 3.81 & 4.21 $\pm$ 1.09 & 0.0088 $\pm$ 0.0031 & 0.0127 & 0.0513\\
+0.10 & 52.19 $\pm$ 3.37 & 9.76 $\pm$ 6.77 & 6.70 $\pm$ 1.86 & 0.0137 $\pm$ 0.0051 & 0.0207 & 0.1053\\
+0.20 & 53.63 $\pm$ 3.15 & 25.36 $\pm$ 29.75 & 13.00 $\pm$ 6.40 & 0.0261 $\pm$ 0.0151 & 0.0345 & 0.2222\\
+0.40 & 57.11 $\pm$ 3.35 & 76.08 $\pm$ 49.61 & 31.51 $\pm$ 10.78 & 0.0565 $\pm$ 0.0213 & 0.0635 & 0.5000\\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection{Calibration prior and its sensitivity}\label{sec:prior}
+The prior of the wrong-intent calibrator is Eq.~\eqref{eq:prior}; Table~\ref{tab:prior} lists its ten values. It is a weak monotone assumption and is not fitted to data. To see how much it matters, three alternatives were run on the same workload: an optimistic prior (four times lower, floored at 0.001), a pessimistic prior (four times higher, capped at 0.99) and an uninformative flat prior of 0.5. Table~\ref{tab:priorsens} gives the results. The hit rate changes by $+0.7$, $-1.5$ and $-5.3$ points (paired $p<0.001$ in all three cases), and harm moves from 6.2 to 4.9, 3.9 and 2.6, none of which is significant after pairing ($p=0.43$, 0.21 and 0.064). The prior therefore acts mainly on availability: a higher prior holds a similarity bin back until enough labels have accumulated to overcome it, so a flat prior costs about five points of hit rate in this workload, whereas the effect on safety is small relative to the seed-to-seed variation. With $n_0=8$ pseudo-observations the influence of the prior fades after a few tens of labels per bin, and the bins above 0.80 receive 100--250 labels per seed and week (Table~\ref{tab:selection}); a deployment with fewer labels would be more sensitive to the choice.
+
+\begin{table}[!t]
+\caption{Prior wrong-intent probability $p_0(b)$ of the ten similarity bins (Eq.~\eqref{eq:prior}; $s_b$ is the bin mid-point)}
+\label{tab:prior}
+\centering\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{cccc}
+\toprule
+Bin $b$ & Range & $s_b$ & $p_0(b)$\\
+\midrule
+1 & 0.50--0.55 & 0.525 & 0.990\\
+2 & 0.55--0.60 & 0.575 & 0.988\\
+3 & 0.60--0.65 & 0.625 & 0.958\\
+4 & 0.65--0.70 & 0.675 & 0.867\\
+5 & 0.70--0.75 & 0.725 & 0.651\\
+6 & 0.75--0.80 & 0.775 & 0.349\\
+7 & 0.80--0.85 & 0.825 & 0.133\\
+8 & 0.85--0.90 & 0.875 & 0.042\\
+9 & 0.90--0.95 & 0.925 & 0.012\\
+10 & 0.95--1.00 & 0.975 & 0.005\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[!t]
+\caption{Sensitivity to the calibration prior in the extended simulator (RAASC $+$ inv, $\rho=0.05$; 0\pct{} outage; mean $\pm$ 95\pct{} CI over 20 seeds; wrong-intent: \pct{} of cache-served answers)}
+\label{tab:priorsens}
+\centering\scriptsize
+\setlength{\tabcolsep}{1.2pt}
+\begin{tabular}{lccccc}
+\toprule
+Prior & Hit \% & Unsafe \% & Wrong \% & Harm & Energy (J)\\
+\midrule
+Default (Eq.~\eqref{eq:prior}) & 50.64 $\pm$ 3.37 & 0.61 $\pm$ 0.25 & 0.17 $\pm$ 0.20 & 6.21 $\pm$ 3.81 & 8.36 $\pm$ 0.50\\
+Optimistic ($p_0/4$) & 51.30 $\pm$ 3.43 & 0.55 $\pm$ 0.11 & 0.08 $\pm$ 0.05 & 4.94 $\pm$ 1.04 & 8.26 $\pm$ 0.50\\
+Pessimistic ($4p_0$) & 49.10 $\pm$ 3.40 & 0.47 $\pm$ 0.08 & 0.05 $\pm$ 0.03 & 3.87 $\pm$ 0.73 & 8.58 $\pm$ 0.50\\
+Flat (0.5) & 45.36 $\pm$ 3.36 & 0.36 $\pm$ 0.07 & 0.05 $\pm$ 0.02 & 2.55 $\pm$ 0.51 & 9.14 $\pm$ 0.50\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Selection bias of the calibration labels}\label{sec:selection}
+Section~\ref{sec:coverage} draws independent labels. In the cache, labels come from two selected sources: the best-scoring candidate of every query that is \emph{not} served (a miss), and a random 2\pct{} of the served hits (an audit). To measure the effect, the extended simulator also records an oracle label for the best-scoring candidate of \emph{every} query, served or not, which no deployed gateway could observe. Table~\ref{tab:selection} compares, for the six upper bins, the wrong-intent rate seen in the miss labels, in the audit labels and among all decisions, and the coverage across the 20 seeds of the end-of-week estimates (Eq.~\eqref{eq:wrong}, the Hoeffding bound and the Clopper--Pearson bound) with respect to the all-decision rate of the same seed.
+
+Below 0.80 only miss labels exist, but almost every decision in these bins is a miss, so the labels cover the bin completely. Above 0.80 only 6.6\pct{} of the decisions are labelled, and 98\pct{} of all labels come from misses. In the one bin that is both served and not free of wrong intents (0.80--0.85), the miss labels indicate a wrong-intent rate of 3.5\pct{}, the audit labels 2.0\pct{} and the oracle 2.4\pct{}: the selected miss sample over-states the rate slightly, which is the safe direction, but the audit sample of about 15 labels per seed is too small to separate the two. Estimator~\eqref{eq:wrong} has a mean value of 0.026 in this bin, close to the oracle value, and covers it in 85\pct{} of the seeds, against 95\pct{} for the Hoeffding bound (mean 0.101) and 90\pct{} for the exact bound (mean 0.033). In the three bins above 0.85 no wrong-intent label ever occurs, the estimates fall to 0.001--0.007 and cover the oracle value of zero trivially.
+
+The result must be read with the limitation of the workload: in the synthetic embeddings a different question never reaches a cosine above about 0.85, so the oracle rate is exactly zero in the bins that serve most hits, and every estimator is trivially adequate there. The experiment shows that the selection of the labels by itself does not make~\eqref{eq:wrong} unsafe in this workload, and that the confidence-bound alternatives cost a large margin (0.08--0.12 against below 0.03 in the bins above 0.85). It cannot show how the calibrator behaves when hard negatives with high lexical overlap exist, which is the purpose of the validation protocol of Section~\ref{sec:protocol}.
+
+\begin{table*}[!t]
+\caption{Label sources and estimator coverage in the cache (extended simulator; RAASC $+$ inv, $\rho=0.05$; 20 seeds). Decisions are the best-scoring candidates of all queries; the oracle rate is the wrong-intent share of all decisions in the bin, pooled over seeds; coverage is the share of seeds in which the end-of-week estimate is at least the oracle rate of that seed; H: Hoeffding bound, CP: Clopper--Pearson bound}
+\label{tab:selection}
+\centering\small
+\begin{tabular}{ccccccccc}
+\toprule
+ & \multicolumn{3}{c}{Per seed} & \multicolumn{3}{c}{Wrong-intent rate} & Coverage \% & Mean estimate\\
+\cmidrule(lr){2-4}\cmidrule(lr){5-7}
+Bin & Miss labels & Audit labels & Decisions & Miss & Audit & Oracle & \multicolumn{1}{c}{(6) / H / CP} & \multicolumn{1}{c}{(6) / H / CP}\\
+\midrule
+0.70--0.75 & 1912 & 0 & 1912 & 0.812 & -- & 0.812 & 100 / 100 / 100 & 0.810 / 0.830 / 0.817\\
+0.75--0.80 & 942 & 0 & 942 & 0.333 & -- & 0.333 & 100 / 100 / 100 & 0.345 / 0.371 / 0.356\\
+0.80--0.85 & 223 & 15 & 942 & 0.035 & 0.020 & 0.024 & 85 / 95 / 90 & 0.026 / 0.101 / 0.033\\
+0.85--0.90 & 101 & 24 & 1320 & 0 & 0 & 0 & 100 / 100 / 100 & 0.007 / 0.110 / 0.024\\
+0.90--0.95 & 77 & 38 & 2049 & 0 & 0 & 0 & 100 / 100 / 100 & 0.003 / 0.115 / 0.026\\
+0.95--1.00 & 102 & 128 & 6419 & 0 & 0 & 0 & 100 / 100 / 100 & 0.001 / 0.081 / 0.013\\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection{Audit of flagged degraded-mode answers}\label{sec:degaudit}
+The degraded mode of Section~\ref{sec:degraded} serves a flagged answer when the link is down and $R_{j^{*}}\le 4\rho$. The extended simulator checks each flagged answer against the truth, and Table~\ref{tab:degaudit} reports the result at a 10\pct{} outage for the factor 4 and for the two alternatives 2 and 8. With the default factor, 0.24\pct{} of the queries (about 48 per seed) are answered in degraded mode; of these answers 1.97\pct{} are unsafe (1.56\pct{} stale and 0.41\pct{} wrong-intent), about three times the 0.64\pct{} of the unflagged served answers, as expected from the larger risk allowance. Halving the factor changes this little (1.71\pct{}). Doubling it to 8 admits twice as many flagged answers (0.51\pct{} of the queries), but 18.4\pct{} of them are unsafe, almost all because they answer a different question (17.6\pct{} wrong-intent): at $8\rho=0.4$ a static entry with a calibrated wrong-intent probability near 0.4 is still allowed. The factor 4 therefore lies on the safe side of a sharp change between 4 and 8; its position depends on the calibrator and was not located more finely. A warning that the information ``may be outdated'' describes a stale answer but not an answer to a different question, so a deployment could restrict the degraded mode to entries whose wrong-intent estimate alone fits the budget and relax only the staleness part; this variant was not evaluated.
+
+On availability, the extended workload does not reproduce the advantage over the TTL cache seen in Table~\ref{tab:outage}: the TTL cache attains a higher hit rate in this generator (54.3\pct{} against 50.5\pct{}), so its unanswered share (4.62\pct{}) is below that of RAASC without the degraded mode (4.99\pct{}), and the degraded mode closes most of the gap (4.76\pct{} at factor 4 and 4.48\pct{} at factor 8). The availability result of Table~\ref{tab:outage} thus depends on the hit-rate relation between the two caches, which in turn depends on the generator.
+
+\begin{table*}[!t]
+\caption{Audit of flagged answers at 10\pct{} link outage in the extended simulator (RAASC $+$ inv; mean $\pm$ 95\pct{} CI over 20 seeds; the stale, wrong-intent and unsafe shares of the flagged answers are pooled over the seeds; the last column is the unsafe share of the unflagged served answers)}
+\label{tab:degaudit}
+\centering\small
+\begin{tabular}{lcccccccc}
+\toprule
+Variant & Unans. \% & Flagged \% & Flagged / seed & Stale \% & Wrong \% & Unsafe \% & Unsafe \% (unflagged)\\
+\midrule
+Cloud-only & 10.04 $\pm$ 0.11 & 0 & -- & -- & -- & -- & --\\
+Class-aware TTL & 4.62 $\pm$ 0.34 & 0 & -- & -- & -- & -- & 3.06 $\pm$ 1.42\\
+No degraded mode & 4.99 $\pm$ 0.35 & 0 & -- & -- & -- & -- & 0.64 $\pm$ 0.26\\
+Factor 2 ($2\rho$) & 4.78 $\pm$ 0.37 & 0.22 $\pm$ 0.02 & 43.8 & 1.49 & 0.23 & 1.71 & 0.64 $\pm$ 0.26\\
+Factor 4 (default) & 4.76 $\pm$ 0.37 & 0.24 $\pm$ 0.03 & 48.2 & 1.56 & 0.41 & 1.97 & 0.64 $\pm$ 0.26\\
+Factor 8 ($8\rho$) & 4.48 $\pm$ 0.40 & 0.51 $\pm$ 0.07 & 102.9 & 0.78 & 17.64 & 18.42 & 0.64 $\pm$ 0.26\\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection{Evaluation of the deny-list}\label{sec:denylist}
+The workload of the preceding sections does not contain a deny category, so Tables~\ref{tab:main}--\ref{tab:coverage} cannot show what the deny-list of Section~\ref{sec:denydesign} does. Section~\ref{sec:setup} describes the deny-category workload (40 of 400 intents, about 10\pct{} of the queries, harm weighted with 10, router recall $r$). Table~\ref{tab:deny} compares RAASC $+$ inv without the deny-list, with a router of recall 0.7, 0.9 and 1, and, for reference, the TTL $+$ inv cache with and without the deny-list.
+
+Without the deny-list, RAASC serves 52\pct{} of the deny-category queries from the cache, 6.3 of them unsafe per seed, which gives a deny-category harm of 3.1 per 1,000 queries; the TTL $+$ inv cache serves 56\pct{} and has 19.6 unsafe deny-category answers per seed (harm 9.7). With a router of recall one, no deny-category query is served from the cache and this harm is zero, at a price: the hit rate falls by 4.6 points (paired $p=0.002$) and the energy per query rises by 0.67\,J ($p=0.002$), because about half of these queries would otherwise have been served. A router with recall 0.9 or 0.7 lets 0.2\pct{} or 2.2\pct{} of the deny-category queries through (deny-category harm 0.02 and 0.07). The leak is small because every detected query purges the cached entries of its intent, so that a missed detection can only be served from an entry that an earlier undetected query has admitted since the last purge; this protection depends on the query frequency of the intent, and rare deny-category intents, which the router also sees rarely, were not simulated separately. The overall unsafe share and harm of the workload are nearly unchanged (0.61\pct{} to 0.62\pct{}; 6.2 to 5.9), because the deny-category intents are no riskier than the others in this generator: the deny-list is justified by clinical severity, which the update statistics of the simulation cannot express. The experiment therefore measures the availability cost and the effect of imperfect recall, not the clinical benefit.
+
+\begin{table*}[!t]
+\caption{Deny-list on the deny-category workload (extended simulator; $\rho=0.05$; 0\pct{} outage; mean $\pm$ 95\pct{} CI over 20 seeds; deny served: share of the deny-category queries answered from the cache; unsafe / seed: unsafe answers among them; deny harm: unsafe deny-category answers weighted with 10, per 1,000 queries)}
+\label{tab:deny}
+\centering\footnotesize
+\begin{tabular}{llcccccc}
+\toprule
+Policy & Recall $r$ & Hit \% & Deny served \% & Unsafe / seed & Deny harm & Harm & Energy (J)\\
+\midrule
+TTL$+$inv, no list & -- & 54.19 $\pm$ 3.14 & 55.7 & 19.60 & 9.70 $\pm$ 6.14 & 27.03 $\pm$ 30.12 & 7.67 $\pm$ 0.47\\
+TTL$+$inv, list & 1.0 & 49.44 $\pm$ 3.43 & 0.0 & 0.00 & 0.00 $\pm$ 0.00 & 26.21 $\pm$ 30.99 & 8.38 $\pm$ 0.51\\
+RAASC$+$inv, no list & -- & 50.64 $\pm$ 3.37 & 51.6 & 6.25 & 3.10 $\pm$ 1.80 & 6.21 $\pm$ 3.81 & 8.36 $\pm$ 0.50\\
+RAASC$+$inv, list & 0.7 & 46.24 $\pm$ 3.49 & 2.2 & 0.15 & 0.07 $\pm$ 0.11 & 5.84 $\pm$ 3.93 & 9.00 $\pm$ 0.51\\
+RAASC$+$inv, list & 0.9 & 46.06 $\pm$ 3.55 & 0.2 & 0.05 & 0.02 $\pm$ 0.05 & 5.84 $\pm$ 3.93 & 9.03 $\pm$ 0.52\\
+RAASC$+$inv, list & 1.0 & 46.07 $\pm$ 3.56 & 0.0 & 0.00 & 0.00 $\pm$ 0.00 & 5.87 $\pm$ 3.92 & 9.03 $\pm$ 0.52\\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\section{Discussion and Limitations}\label{sec:discussion}
+\subsection{Interpretation of the results}
+The fixed TTL and the fixed threshold are two separate, uncalibrated rules. RAASC replaces both with one quantity, the expected severity-weighted risk, whose inputs are learned from signals that the gateway already receives (version tags and cloud answers on misses). Proposition~\ref{prop:reuse} shows that the rule behaves as an adaptive TTL per intent. On the synthetic workload this gives a large reduction in unsafe responses at a comparable hit rate and energy per query (Table~\ref{tab:main}). The operator also controls the system through one parameter, the risk budget, which a clinical safety officer can audit more easily than a table of TTLs and a similarity threshold. The adaptation is only partly demonstrated: the calibrator raises the hit rate (Table~\ref{tab:ablation}), and the adaptive rate estimator has no effect when the class priors are correct but lowers harm by about one third when update rates deviate from the priors or change over time (Table~\ref{tab:shift}), at a cost of about one point of hit rate under a shift. The additional baselines show where the gain comes from: a TTL cache that uses the reuse limits of Section~\ref{sec:reuse} is not significantly less safe than RAASC with invalidation at 20 seeds, so most of the safety gain stems from the intent-class reuse limit, whereas the calibrated similarity test supplies the higher hit rate (Tables~\ref{tab:paired} and~\ref{tab:baselines}). The extended analyses qualify this picture in four ways. The realised severity-weighted cost per served answer stays well inside the budget, but the true-intent harm diverges from the served-class cost as the budget grows (Section~\ref{sec:consistency}); the calibration prior mainly moves availability (Section~\ref{sec:prior}); flagged answers are about three times as often unsafe as unflagged ones, and the risk allowance of the degraded mode has a sharp upper limit (Section~\ref{sec:degaudit}); and a deny-list with perfect recall removes the deny-category exposure at a cost of about 4.6 points of hit rate (Section~\ref{sec:denylist}).
+
+\subsection{Deployment considerations}\label{sec:deploy}
+The severity weights and the risk budget must be set by clinical governance and reviewed when intents are added or guidelines change; the values 1, 2 and 5 are placeholders. Patient-specific, time-sensitive information such as results, medication changes and appointment slots must never be served from the cache. A high severity makes this unlikely, but RAASC does not depend on it: these categories are excluded by the explicit deny-list of Section~\ref{sec:denydesign}, whose recall is that of the intent router in front of it and whose effect Section~\ref{sec:denylist} evaluates for a synthetic deny category with recall between 0.7 and 1. After the deny-list, event-driven invalidation is the most effective safety measure in our results (the harm of the TTL baseline in Table~\ref{tab:main} falls from 39.5 to 12.2 once invalidation is added), so a clinic should publish protocol and label changes to the gateway whenever it can. Delayed or lost events behave like a lower push coverage $\kappa_c$; periodic revalidation by version tag is a possible remedy that we did not evaluate. Shadow auditing sends de-identified text to the cloud for a small fraction of hits (2\pct{} here); the rate can be lowered when the calibrator is stable and raised after a change of model or vocabulary \cite{gama2014}. Further issues remain open: conflicting information from different clinical sources, the periodic review of severity weights, and the risk that an incorrect cloud answer \cite{ji2023,singhal2023} enters the cache, for which only answers from a curated, versioned knowledge base should be admitted. The voice-biomarker path follows the guided-recording protocol recommended in \cite{carron2021}, and RAASC does not touch audio. Finally, a cache that serves health information may fall under medical-device or health-data regulation, depending on the jurisdiction; this paper makes no such assessment.
+
+\subsection{Threats to validity}\label{sec:threats}
+First, the evaluation uses an artificial workload in which the embeddings are random vectors rather than the output of a sentence encoder \cite{reimers2019}; the traffic, the update process and the severity weights are all assumed, and the paraphrase and same-topic cosines were set to match \cite{montoya2025}, so they are not an independent check; Section~\ref{sec:protocol} specifies how to remove this limitation with public data. In particular, the synthetic embeddings contain no high-similarity wrong-intent pairs, so Sections~\ref{sec:coverage} and~\ref{sec:selection} cannot detect an under-estimate of the wrong-intent probability caused by hard negatives. Second, we assume that the cloud provides correct and current answers with a version tag, whereas real question-answering systems can err \cite{ji2023,singhal2023}. Third, we assume that the gateway can tell whether a cached and a cloud answer have the same intent; this needs an identifier or an answer-comparison model, which has its own errors that would enter the calibrator as label noise. Fourth, absolute rates will differ on real traffic. Fifth, latency, power and the constant-power model $E=P\,t$ come from one prototype \cite{montoya2025} and ignore radio, compute and idle states. Sixth, only a seven-day, 100-entry, single-gateway scenario was simulated, with five risk budgets. Seventh, the intervals reflect variance between seeds, not model error, and several comparisons (hit rate, latency, energy) fall within them, although the paired tests resolve some of them (Table~\ref{tab:paired}). Eighth, we did not measure the correlation between stale and wrong-intent events; Proposition~\ref{prop:bound}(b) bounds its effect, but the experiments do not test it. Ninth, $L_{\min}$ and the severity weights were not stress-tested, and the degraded-mode factor was varied only over 2, 4 and 8 (Section~\ref{sec:degaudit}); the rate estimator was tested on three synthetic update patterns only (Section~\ref{sec:shift}), and the added baselines (a fixed-threshold semantic cache, the TTL cache with the limits of Section~\ref{sec:reuse}, LFU and ARC \cite{megiddo2003}) run on the same synthetic traffic; the TTL values and the threshold of 0.80 of the baseline are assumed and were not swept. Tenth, the results come from two versions of the simulator (Section~\ref{sec:setup}): the tables of Sections~\ref{sec:consistency}--\ref{sec:denylist} use an extended generator whose absolute levels, and in particular the hit-rate relation between RAASC and the TTL cache, differ from Tables~\ref{tab:main}--\ref{tab:shift}, so the two groups of tables must not be combined, and a single-version rerun of all experiments is still to be done. Eleventh, the deny-category workload assumes that the router misses queries independently and that deny-category intents are drawn uniformly, and the severity of 10 is an assumption. Finally, the budget is enforced with estimated probabilities, so there is no distribution-free guarantee, unlike conformal methods \cite{angelopoulos2021}, and the estimator~\eqref{eq:wrong} is not conservative (Section~\ref{sec:coverage}).
+
+\subsection{Protocol for validation on real embeddings and public data}\label{sec:protocol}
+The synthetic embeddings are the main limit of the present evaluation, and validating the design does not require clinical traffic. The protocol has five steps. (i) Replace the random vectors by the output of a sentence encoder \cite{reimers2019} and build the workload from public question collections: MedQuAD, a collection of 47,457 medical question--answer pairs with annotations \cite{benabacha2019}, supplies medical questions and topics, and PAWS, a set of human-labelled paraphrase and non-paraphrase pairs with high lexical overlap \cite{zhang2019}, supplies hard same-intent and different-intent pairs, so that the calibrator of Eq.~\eqref{eq:wrong} is fed with real labels. (ii) Report the calibration error of $p_{\text{wrong}}$ per similarity bin on held-out pairs before any cache simulation, because Proposition~\ref{prop:bound} depends on it (Table~\ref{tab:wrongeffect} shows why the high-similarity bins matter most). (iii) Replace the assumed Poisson rates by rates fitted to public revision histories, for example of drug labels or guidelines, and repeat Sections~\ref{sec:main} to~\ref{sec:shift} with a threshold sweep and tuned TTL values for the baselines. (iv) Add a learned-threshold semantic cache \cite{schroeder2026} as a baseline on the public benchmarks released with it, and run the exact binomial bound of Section~\ref{sec:coverage} as a calibrator inside the simulation; the staleness dimension would still have to be added by simulation. (v) Measure energy on the target gateway hardware. Only after these steps should the severity weights and the budget go to a supervised clinical pilot. Steps (i) and (ii) have not been carried out in this paper; no result with a real sentence encoder or with public question data is reported, and Sections~\ref{sec:coverage} and~\ref{sec:selection} test the calibrator on synthetic embeddings only. This is the principal open limitation of the work.
+
+\section{Conclusion and Future Work}\label{sec:conclusion}
+We presented RAASC, a risk-aware adaptive semantic cache for edge healthcare voice assistants, with an analysis of its estimators and reuse limit, a reference implementation and a seeded evaluation. RAASC estimates the staleness and wrong-intent probabilities of each entry online and serves only entries whose severity-weighted risk fits a budget. Against a class-aware TTL cache on a synthetic workload, it reduced unsafe cached answers from 3.14\pct{} to 0.28\pct{} and risk-weighted harm by 89\pct{}, at a comparable hit rate and energy. Combined with a flagged degraded mode, it also raised availability during link outages. The single risk budget makes the trade-off between safety and energy explicit: relaxing it to 0.20 saves 48\pct{} energy against cloud-only, at a higher harm (25.1 instead of 3.5 per 1,000 queries). Paired tests and further baselines show that most of the safety gain comes from the adaptive reuse limit and the extra hits from the calibrated similarity test, and the rate estimator pays off when update rates deviate from the class priors. Extended analyses show that the realised cost per served answer stays inside the budget, that the choice of the calibration prior moves availability more than safety, that flagged answers must be restricted carefully, and that a deny-list removes the deny-category exposure at a measurable availability cost.
+
+As future work we plan to (1) replace synthetic embeddings with an actual sentence encoder and public question data following the protocol of Section~\ref{sec:protocol}, and later with real clinic question logs \cite{reimers2019}; (2) evaluate power on target hardware rather than using $E=P\,t$; (3) extend the estimator test to discounted (forgetting) statistics and to measured update logs, since the cumulative estimator recovers only part of the harm after a rate shift \cite{gama2014}; (4) extend the baseline comparison to a threshold sweep, tuned TTL values, a learned-threshold semantic cache \cite{schroeder2026} and real traces, with paired tests as in Section~\ref{sec:paired}, and rerun all experiments with one version of the simulator; (5) run the Hoeffding and exact binomial calibrators of Section~\ref{sec:coverage} inside the cache simulation, measure the correlation between stale and wrong-intent events, and study the sensitivity to $L_{\min}$ and a finer budget grid; (6) add distribution-free guarantees on the wrong-intent rate using conformal calibration \cite{angelopoulos2021} and tail-risk budgets using conditional value at risk \cite{rockafellar2000}; (7) evaluate a degraded mode that is restricted to entries whose wrong-intent estimate alone fits the budget, and a deny-list with a rare-intent workload; and (8) run a supervised clinical pilot, with clinicians setting the severity weights, to validate the safety margins on real traffic.
+
+\begin{thebibliography}{10}
+\bibitem{montoya2025} A.~O. Montoya~Benitez, \'A.~Su\'arez~Sarmiento, E.~M. Mac\'ias~L\'opez, and J.~Herrera-Ramirez, ``Optimization of energy consumption in voice assistants through AI-enabled cache implementation: Development and evaluation of a metric,'' \emph{Technologies}, vol.~13, no.~1, art.~19, 2025, doi: 10.3390/technologies13010019.
+\bibitem{speckhard2023} D.~T. Speckhard, K.~Misiunas, S.~Perel, T.~Zhu, S.~Carlile, and M.~Slaney, ``Neural architecture search for energy-efficient always-on audio machine learning,'' \emph{Neural Comput. Appl.}, vol.~35, pp.~12133--12144, 2023, doi: 10.1007/s00521-023-08345-y.
+\bibitem{shi2016} W.~Shi, J.~Cao, Q.~Zhang, Y.~Li, and L.~Xu, ``Edge computing: Vision and challenges,'' \emph{IEEE Internet Things J.}, vol.~3, no.~5, pp.~637--646, 2016.
+\bibitem{satya2017} M.~Satyanarayanan, ``The emergence of edge computing,'' \emph{Computer}, vol.~50, no.~1, pp.~30--39, 2017.
+\bibitem{zhou2019} Z.~Zhou, X.~Chen, E.~Li, L.~Zeng, K.~Luo, and J.~Zhang, ``Edge intelligence: Paving the last mile of artificial intelligence with edge computing,'' \emph{Proc. IEEE}, vol.~107, no.~8, pp.~1738--1762, 2019.
+\bibitem{wang2014} X.~Wang, M.~Chen, T.~Taleb, A.~Ksentini, and V.~C.~M. Leung, ``Cache in the air: Exploiting content caching and delivery techniques for 5G systems,'' \emph{IEEE Commun. Mag.}, vol.~52, no.~2, pp.~131--139, 2014.
+\bibitem{breslau1999} L.~Breslau, P.~Cao, L.~Fan, G.~Phillips, and S.~Shenker, ``Web caching and Zipf-like distributions: Evidence and implications,'' in \emph{Proc. IEEE INFOCOM}, 1999, pp.~126--134.
+\bibitem{kang2017} Y.~Kang \emph{et al.}, ``Neurosurgeon: Collaborative intelligence between the cloud and mobile edge,'' \emph{ACM SIGPLAN Not.}, vol.~52, no.~4, pp.~615--629, 2017.
+\bibitem{tan2019} M.~Tan \emph{et al.}, ``MnasNet: Platform-aware neural architecture search for mobile,'' in \emph{Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR)}, 2019, pp.~2820--2828.
+\bibitem{golovin2017} D.~Golovin \emph{et al.}, ``Google Vizier: A service for black-box optimization,'' in \emph{Proc. 23rd ACM SIGKDD Int. Conf. Knowl. Discovery Data Mining}, 2017, pp.~1487--1495.
+\bibitem{sandler2018} M.~Sandler, A.~Howard, M.~Zhu, A.~Zhmoginov, and L.-C. Chen, ``MobileNetV2: Inverted residuals and linear bottlenecks,'' in \emph{Proc. IEEE Conf. Comput. Vis. Pattern Recognit. (CVPR)}, 2018, pp.~4510--4520.
+\bibitem{howard2017} A.~G. Howard \emph{et al.}, ``MobileNets: Efficient convolutional neural networks for mobile vision applications,'' arXiv:1704.04861, 2017.
+\bibitem{hershey2017} S.~Hershey \emph{et al.}, ``CNN architectures for large-scale audio classification,'' in \emph{Proc. IEEE Int. Conf. Acoust., Speech Signal Process. (ICASSP)}, 2017, pp.~131--135.
+\bibitem{gemmeke2017} J.~F. Gemmeke \emph{et al.}, ``Audio Set: An ontology and human-labeled dataset for audio events,'' in \emph{Proc. IEEE Int. Conf. Acoust., Speech Signal Process. (ICASSP)}, 2017, pp.~776--780.
+\bibitem{xu2020} L.~Xu, A.~Iyengar, and W.~Shi, ``CHA: A caching framework for home-based voice assistant systems,'' in \emph{Proc. IEEE/ACM Symp. Edge Comput. (SEC)}, 2020, pp.~293--306.
+\bibitem{megiddo2003} N.~Megiddo and D.~S. Modha, ``ARC: A self-tuning, low overhead replacement cache,'' in \emph{Proc. USENIX Conf. File Storage Technol. (FAST)}, 2003, pp.~115--130.
+\bibitem{reimers2019} N.~Reimers and I.~Gurevych, ``Sentence-BERT: Sentence embeddings using Siamese BERT-networks,'' in \emph{Proc. Conf. Empirical Methods Nat. Lang. Process. (EMNLP-IJCNLP)}, 2019, pp.~3982--3992.
+\bibitem{bang2023} F.~Bang, ``GPTCache: An open-source semantic cache for LLM applications enabling faster answers and cost savings,'' in \emph{Proc. 3rd Workshop NLP Open Source Softw. (NLP-OSS)}, 2023, pp.~212--218.
+\bibitem{lewis2020} P.~Lewis \emph{et al.}, ``Retrieval-augmented generation for knowledge-intensive NLP tasks,'' in \emph{Advances Neural Inf. Process. Syst. (NeurIPS)}, vol.~33, 2020, pp.~9459--9474.
+\bibitem{singhal2023} K.~Singhal \emph{et al.}, ``Large language models encode clinical knowledge,'' \emph{Nature}, vol.~620, pp.~172--180, 2023.
+\bibitem{ji2023} Z.~Ji \emph{et al.}, ``Survey of hallucination in natural language generation,'' \emph{ACM Comput. Surv.}, vol.~55, no.~12, art.~248, 2023.
+\bibitem{gray1989} C.~Gray and D.~Cheriton, ``Leases: An efficient fault-tolerant mechanism for distributed file cache consistency,'' in \emph{Proc. 12th ACM Symp. Operating Syst. Principles (SOSP)}, 1989, pp.~202--210.
+\bibitem{cho2000} J.~Cho and H.~Garcia-Molina, ``Synchronizing a database to improve freshness,'' in \emph{Proc. ACM SIGMOD Int. Conf. Manage. Data}, 2000, pp.~117--128.
+\bibitem{kaul2012} S.~Kaul, R.~Yates, and M.~Gruteser, ``Real-time status: How often should one update?'' in \emph{Proc. IEEE INFOCOM}, 2012, pp.~2731--2739.
+\bibitem{yates2021} R.~D. Yates \emph{et al.}, ``Age of information: An introduction and survey,'' \emph{IEEE J. Sel. Areas Commun.}, vol.~39, no.~5, pp.~1183--1210, 2021.
+\bibitem{gama2014} J.~Gama, I.~{\v Z}liobait{\.e}, A.~Bifet, M.~Pechenizkiy, and A.~Bouchachia, ``A survey on concept drift adaptation,'' \emph{ACM Comput. Surv.}, vol.~46, no.~4, art.~44, 2014.
+\bibitem{guo2017} C.~Guo, G.~Pleiss, Y.~Sun, and K.~Q. Weinberger, ``On calibration of modern neural networks,'' in \emph{Proc. 34th Int. Conf. Mach. Learn. (ICML)}, PMLR vol.~70, 2017, pp.~1321--1330.
+\bibitem{angelopoulos2021} A.~N. Angelopoulos and S.~Bates, ``A gentle introduction to conformal prediction and distribution-free uncertainty quantification,'' arXiv:2107.07511, 2021.
+\bibitem{rockafellar2000} R.~T. Rockafellar and S.~Uryasev, ``Optimization of conditional value-at-risk,'' \emph{J. Risk}, vol.~2, no.~3, pp.~21--41, 2000.
+\bibitem{schroeder2026} L.~G. Schroeder, A.~Desai, A.~Cuadron, K.~Chu, S.~Liu, M.~Zhao, S.~Krusche, A.~Kemper, M.~Zaharia, and J.~E. Gonzalez, ``vCache: Verified semantic prompt caching,'' in \emph{Proc. Int. Conf. Learn. Represent. (ICLR)}, 2026, arXiv:2502.03771.
+\bibitem{little2009} M.~A. Little, P.~E. McSharry, E.~J. Hunter, J.~Spielman, and L.~O. Ramig, ``Suitability of dysphonia measurements for telemonitoring of Parkinson's disease,'' \emph{IEEE Trans. Biomed. Eng.}, vol.~56, no.~4, pp.~1015--1022, 2009.
+\bibitem{tsanas2012} A.~Tsanas, M.~A. Little, P.~E. McSharry, J.~Spielman, and L.~O. Ramig, ``Novel speech signal processing algorithms for high-accuracy classification of Parkinson's disease,'' \emph{IEEE Trans. Biomed. Eng.}, vol.~59, no.~5, pp.~1264--1271, 2012.
+\bibitem{rusz2018} J.~Rusz \emph{et al.}, ``Smartphone allows capture of speech abnormalities associated with high risk of developing Parkinson's disease,'' \emph{IEEE Trans. Neural Syst. Rehabil. Eng.}, vol.~26, no.~8, pp.~1495--1507, 2018.
+\bibitem{carron2021} J.~Carr\'on, Y.~Campos-Roca, M.~Madruga, and C.~J. P\'erez, ``A mobile-assisted voice condition analysis system for Parkinson's disease: Assessment of usability conditions,'' \emph{BioMed. Eng. OnLine}, vol.~20, art.~114, 2021, doi: 10.1186/s12938-021-00951-y.
+\bibitem{bot2016} B.~M. Bot \emph{et al.}, ``The mPower study, Parkinson disease mobile data collected using ResearchKit,'' \emph{Sci. Data}, vol.~3, art.~160011, 2016, doi: 10.1038/sdata.2016.11.
+\bibitem{hoeffding1963} W.~Hoeffding, ``Probability inequalities for sums of bounded random variables,'' \emph{J. Amer. Statist. Assoc.}, vol.~58, no.~301, pp.~13--30, 1963.
+\bibitem{clopper1934} C.~J. Clopper and E.~S. Pearson, ``The use of confidence or fiducial limits illustrated in the case of the binomial,'' \emph{Biometrika}, vol.~26, no.~4, pp.~404--413, 1934.
+\bibitem{benabacha2019} A.~Ben~Abacha and D.~Demner-Fushman, ``A question-entailment approach to question answering,'' \emph{BMC Bioinformatics}, vol.~20, art.~511, 2019, doi: 10.1186/s12859-019-3119-4.
+\bibitem{zhang2019} Y.~Zhang, J.~Baldridge, and L.~He, ``PAWS: Paraphrase adversaries from word scrambling,'' in \emph{Proc. Conf. North Amer. Chapter Assoc. Comput. Linguistics: Human Lang. Technol. (NAACL-HLT)}, 2019, pp.~1298--1308, doi: 10.18653/v1/N19-1131.
+\end{thebibliography}
+
+\end{document}
